@@ -75,3 +75,16 @@ code { font-size: 12px; }
 .preview h3 { margin: 0 0 4px; font-size: 16px; }
 .preview ol { margin: 6px 0 0; padding-left: 20px; }
 .preview li { margin-bottom: 2px; }
+.people h2 span { font-weight: 400; }
+.people { margin-bottom: 16px; }
+.review { border: 2px solid var(--accent-2); border-radius: 12px; padding: 14px; display: flex; flex-direction: column; gap: 10px; }
+.review h3 { margin: 0; font-size: 15px; }
+.spk { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 220px); gap: 12px; padding: 10px 0; border-top: 1px solid var(--line); }
+.spk-label { font-weight: 700; }
+.spk-meta { font-size: 12px; color: var(--muted); }
+.spk-sample { font-size: 13px; margin: 4px 0 0; }
+.spk-sample b { color: var(--muted); font-weight: 500; font-variant-numeric: tabular-nums; }
+.spk-name { display: flex; flex-direction: column; gap: 4px; }
+.conf { font-size: 12px; }
+.conf.cao { color: var(--ok); } .conf.trung { color: var(--warn); } .conf.thap { color: var(--bad); }
+@media (max-width: 600px) { .spk { grid-template-columns: 1fr; } }

@@ -48,7 +48,7 @@ export async function buildDocx(summary, frames, transcript, meta, includeTransc
   const metaRows = [
     ["Nguồn", meta.sourceName || ""],
     ["Thời lượng", fmtTs(meta.duration || 0)],
-    ["Thành phần", (summary.participants || []).join(", ") || "—"],
+    ["Thành phần", (meta.participants?.length ? meta.participants : (summary.speakers || []).map((s) => s.name)).join("; ") || "—"],
     ["Ngày tạo báo cáo", new Date().toLocaleString("vi-VN")],
   ];
   body.push(new Table({
@@ -63,6 +63,61 @@ export async function buildDocx(summary, frames, transcript, meta, includeTransc
   if (summary.key_takeaways?.length) {
     body.push(H("Điểm chính", HeadingLevel.HEADING_2));
     body.push(...bullets(summary.key_takeaways));
+  }
+
+  // who said what
+  const speakers = (summary.speakers || []).filter((s) => s.name && s.contributions?.length);
+  if (speakers.length) {
+    body.push(H("Phát biểu theo từng người", HeadingLevel.HEADING_2));
+    for (const sp of speakers) {
+      body.push(new Paragraph({
+        spacing: { before: 120, after: 60 },
+        children: [new TextRun({ text: sp.name, bold: true, color: ACCENT }), ...(sp.role ? [muted(`  —  ${sp.role}`, 20)] : [])],
+      }));
+      body.push(...bullets(sp.contributions));
+    }
+  }
+
+  // tasks grouped by person, right after the overview so they are easy to find
+  const items = (summary.action_items || []).filter((it) => it.task);
+  if (items.length) {
+    body.push(H("Việc của từng người", HeadingLevel.HEADING_2));
+    const groups = new Map();
+    for (const it of items) {
+      const who = (it.assignee || "Chưa rõ").trim() || "Chưa rõ";
+      if (!groups.has(who)) groups.set(who, []);
+      groups.get(who).push(it);
+    }
+    const order = [...groups.keys()].sort((a, b) => (a === "Chưa rõ") - (b === "Chưa rõ") || (a === "Cả nhóm") - (b === "Cả nhóm"));
+    const widths = [5, 53, 16, 14, 12];
+    for (const who of order) {
+      body.push(new Paragraph({
+        spacing: { before: 160, after: 80 },
+        children: [new TextRun({ text: `👤 ${who}`, bold: true, size: 24, color: ACCENT }), muted(`  (${groups.get(who).length} việc)`, 20)],
+      }));
+      body.push(new Table({
+        width: { size: 100, type: WidthType.PERCENTAGE },
+        rows: [
+          new TableRow({ tableHeader: true, children: ["#", "Việc cần làm", "Người giao", "Thời hạn", "Mốc giờ"]
+            .map((h, j) => cell(h, { bold: true, fill: ACCENT, color: "FFFFFF", width: widths[j] })) }),
+          ...groups.get(who).map((it, k) => new TableRow({
+            children: [
+              cell(String(k + 1), { width: widths[0] }),
+              new TableCell({
+                width: { size: widths[1], type: WidthType.PERCENTAGE },
+                children: [
+                  new Paragraph({ children: [new TextRun({ text: it.task, bold: true })] }),
+                  ...(it.quote ? [new Paragraph({ children: [new TextRun({ text: `“${it.quote.trim()}”`, italics: true, color: MUTED, size: 18 })] })] : []),
+                ],
+              }),
+              cell(it.assigned_by || "—", { width: widths[2] }),
+              cell(it.deadline || "—", { width: widths[3] }),
+              cell(it.t || "—", { width: widths[4] }),
+            ],
+          })),
+        ],
+      }));
+    }
   }
 
   body.push(H("2. Nội dung chi tiết", HeadingLevel.HEADING_1));
@@ -95,20 +150,6 @@ export async function buildDocx(summary, frames, transcript, meta, includeTransc
   if (summary.decisions?.length) {
     body.push(H(`${n++}. Quyết định`, HeadingLevel.HEADING_1));
     body.push(...bullets(summary.decisions));
-  }
-  if (summary.action_items?.length) {
-    body.push(H(`${n++}. Công việc cần thực hiện`, HeadingLevel.HEADING_1));
-    const head = ["#", "Công việc", "Phụ trách", "Thời hạn"];
-    const widths = [6, 56, 22, 16];
-    body.push(new Table({
-      width: { size: 100, type: WidthType.PERCENTAGE },
-      rows: [
-        new TableRow({ tableHeader: true, children: head.map((h, j) => cell(h, { bold: true, fill: ACCENT, color: "FFFFFF", width: widths[j] })) }),
-        ...summary.action_items.map((it, k) => new TableRow({
-          children: [String(k + 1), it.task || "", it.owner || "—", it.deadline || "—"].map((v, j) => cell(v, { width: widths[j] })),
-        })),
-      ],
-    }));
   }
   if (summary.open_questions?.length) {
     body.push(H(`${n++}. Vấn đề còn bỏ ngỏ`, HeadingLevel.HEADING_1));

@@ -15,6 +15,18 @@ của chính người dùng.
    - **Tải lên video/audio:** MP4, WEBM, MKV, MOV, MP3, M4A, WAV… tối đa 2 GB.
 4. Đợi xử lý xong, file DOCX tự tải về. Bản gỡ băng (.txt) có nút tải riêng.
 
+## Ai nói gì, giao việc cho ai
+
+- **Người dự họp:** điền mỗi dòng một người theo dạng `Tên – vai trò`. Danh sách này được nhớ cho lần sau.
+  Gemini dùng nó để gắn tên cho từng giọng nói.
+- **Tên của bạn** (tab Cài đặt): khi ghi họp có trộn micro, trang đo lúc micro của bạn có tiếng. Giọng nào
+  trùng micro nhiều nhất (≥ 40% và gấp đôi người đứng sau) sẽ được gắn tên bạn.
+- **Xác nhận người nói:** sau bước gỡ băng, trang hiện từng giọng kèm câu mẫu, tên gợi ý và độ tin cậy.
+  Bạn sửa hoặc chọn tên, rồi bấm xác nhận để viết báo cáo. Có thể tắt bước này trong Cài đặt.
+- Báo cáo có thêm hai mục:
+  - **Phát biểu theo từng người:** mỗi người trình bày, đề xuất, cam kết điều gì.
+  - **Việc của từng người:** bảng việc theo từng người được giao, gồm người giao, thời hạn, câu nói gốc và mốc giờ.
+
 ## Quyền riêng tư
 
 - Trang chạy hoàn toàn trong trình duyệt, không có máy chủ trung gian.
@@ -46,6 +58,7 @@ js/gemini.js    xoay vòng key, Files API, generateContent
 js/media.js     thời lượng, cắt khung hình
 js/report.js    dựng DOCX
 js/prompts.js   prompt + JSON schema
+js/speakers.js  thống kê người nói, đối chiếu micro, gợi ý tên
 ```
 
 Chạy thử ở máy: `python -m http.server 8000` trong thư mục này rồi mở http://localhost:8000.

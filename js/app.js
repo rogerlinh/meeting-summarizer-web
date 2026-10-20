@@ -7,7 +7,8 @@ const mask = (k) => (k.length > 12 ? `${k.slice(0, 6)}…${k.slice(-4)}` : "****
 
 // ---------- settings (this browser only) ----------
 const STORE = "meeting-summarizer-settings";
-const DEFAULTS = { keys: [], models: ["gemini-3.8-flash", "gemini-3.5-flash-lite"], language: "Tiếng Việt", chunkMinutes: 15, includeTranscript: true };
+const DEFAULTS = { keys: [], models: ["gemini-3.8-flash", "gemini-3.5-flash-lite"], language: "Tiếng Việt", chunkMinutes: 15,
+  includeTranscript: true, myName: "", reviewSpeakers: true, participants: "" };
 function loadSettings() {
   try { return { ...DEFAULTS, ...JSON.parse(localStorage.getItem(STORE) || "{}") }; } catch { return { ...DEFAULTS }; }
 }
@@ -38,6 +39,9 @@ function renderSettings() {
   $("#language").value = settings.language;
   $("#chunkMinutes").value = settings.chunkMinutes;
   $("#includeTranscript").checked = settings.includeTranscript;
+  $("#myName").value = settings.myName;
+  $("#reviewSpeakers").checked = settings.reviewSpeakers;
+  if (document.activeElement !== $("#participants")) $("#participants").value = settings.participants;
   const warn = settings.keys.length ? "" : 'Chưa có Gemini API key. Vào tab <b>API key & Cài đặt</b> để nhập key của bạn.';
   $("#warn").innerHTML = warn; $("#warn").classList.toggle("hidden", !warn);
 }
@@ -59,6 +63,8 @@ $("#saveSettings").onclick = () => {
   settings.language = $("#language").value.trim() || DEFAULTS.language;
   settings.chunkMinutes = Math.min(40, Math.max(5, +$("#chunkMinutes").value || 15));
   settings.includeTranscript = $("#includeTranscript").checked;
+  settings.myName = $("#myName").value.trim();
+  settings.reviewSpeakers = $("#reviewSpeakers").checked;
   saveSettings(settings); renderSettings();
   $("#saved").textContent = "✓ Đã lưu"; setTimeout(() => ($("#saved").textContent = ""), 2000);
 };
@@ -67,6 +73,45 @@ $("#clearAll").onclick = () => {
   try { localStorage.removeItem(STORE); } catch { /* ignore */ }
   settings = loadSettings(); renderSettings(); toast("Đã xoá");
 };
+
+// ---------- participants (remembered for the next meeting) ----------
+$("#participants").oninput = () => { settings.participants = $("#participants").value; saveSettings(settings); };
+const participantList = () => $("#participants").value.split("\n").map((l) => l.trim()).filter(Boolean);
+const personName = (line) => line.split(/\s+[–—-]\s+|\s*[:(|]\s*/)[0].trim();
+
+/** Show the speaker table and resolve with Map(label -> confirmed name) when the user clicks the button. */
+function reviewSpeakers(stats, participants) {
+  const names = [...new Set([settings.myName, ...participants.map(personName), "Cả nhóm"].filter(Boolean))];
+  $("#peopleList").innerHTML = names.map((n) => `<option value="${esc(n)}">`).join("");
+  const confClass = (c) => ({ "cao": "cao", "trung bình": "trung", "thấp": "thap" }[c] || "thap");
+  $("#reviewRows").innerHTML = stats.map((s, i) => `
+    <div class="spk">
+      <div>
+        <div class="spk-label">${esc(s.label)}</div>
+        <div class="spk-meta">${s.count} lượt nói · ${s.words} từ${s.micRatio != null ? ` · trùng micro của bạn ${Math.round(s.micRatio * 100)}%` : ""}</div>
+        ${s.samples.map((x) => `<p class="spk-sample"><b>${fmt(x.t)}</b> ${esc(x.text)}</p>`).join("")}
+      </div>
+      <div class="spk-name">
+        <input list="peopleList" data-i="${i}" value="${esc(s.suggested === s.label ? "" : s.suggested)}" placeholder="${esc(s.label)}">
+        <span class="conf ${confClass(s.confidence)}">Gợi ý: ${esc(s.suggested)} (độ tin cậy ${esc(s.confidence)})</span>
+        ${s.reason ? `<span class="spk-meta">${esc(s.reason)}</span>` : ""}
+      </div>
+    </div>`).join("");
+  $("#review").classList.remove("hidden");
+  $("#review").scrollIntoView({ behavior: "smooth", block: "start" });
+  return new Promise((resolve) => {
+    $("#reviewOk").onclick = () => {
+      const map = new Map();
+      $("#reviewRows").querySelectorAll("input").forEach((inp) => {
+        const s = stats[+inp.dataset.i];
+        map.set(s.label, inp.value.trim() || s.label);
+      });
+      $("#review").classList.add("hidden");
+      resolve(map);
+    };
+  });
+}
+const fmt = (sec) => { sec = Math.floor(sec); const p = (x) => String(x).padStart(2, "0"); return `${p(Math.floor(sec / 3600))}:${p(Math.floor(sec % 3600 / 60))}:${p(sec % 60)}`; };
 
 // ---------- job runner ----------
 let busy = false;
@@ -96,16 +141,17 @@ async function startJob(file, opts = {}) {
   const card = $("#jobCard"); card.classList.remove("hidden");
   $("#jobTitle").textContent = opts.sourceName || file.name;
   $("#jobPill").className = "pill running"; $("#jobPill").textContent = "Đang xử lý";
-  $("#jobError").classList.add("hidden"); $("#jobOutputs").innerHTML = ""; $("#jobPreview").classList.add("hidden");
+  $("#jobError").classList.add("hidden"); $("#review").classList.add("hidden"); $("#jobOutputs").innerHTML = ""; $("#jobPreview").classList.add("hidden");
   $("#jobLog").textContent = "";
   card.scrollIntoView({ behavior: "smooth", block: "start" });
   const ui = {
     log: (m) => { $("#jobLog").textContent += `${new Date().toLocaleTimeString("vi-VN")} ${m}\n`; },
     step: (m, pct) => { $("#jobStep").textContent = m; $("#jobBar").style.width = `${pct}%`; },
     keyStatus: renderKeyStatus,
+    reviewSpeakers,
   };
   try {
-    const res = await run(file, settings, ui, opts);
+    const res = await run(file, settings, ui, { participants: participantList(), ...opts });
     let base = (res.summary.title || "bao_cao").replace(/[\\/:*?"<>|]+/g, "_").trim();
     if (base.length > 80) base = base.slice(0, 80).replace(/\s+\S*$/, ""); // cut on a word boundary
     base = base || "bao_cao";
@@ -143,7 +189,23 @@ drop.ondrop = (e) => { e.preventDefault(); drop.classList.remove("over"); choose
 $("#upBtn").onclick = () => chosen && startJob(chosen);
 
 // ---------- meeting recording (kept in memory, processed on stop) ----------
-const rec = { recorder: null, streams: [], ctx: null, parts: [], bytes: 0, t0: 0, timer: null, name: "" };
+const rec = { recorder: null, streams: [], ctx: null, parts: [], bytes: 0, t0: 0, timer: null, name: "", mic: [], micTimer: null };
+
+/** Turn 100 ms microphone loudness samples into [start, end] intervals where the user was speaking. */
+function micIntervals(samples) {
+  if (samples.length < 20) return [];
+  const sorted = samples.map((x) => x[1]).sort((a, b) => a - b);
+  const noise = sorted[Math.floor(sorted.length * 0.2)];
+  const thr = Math.max(noise * 3, 0.01);
+  const out = [];
+  for (const [t, rms] of samples) {
+    if (rms < thr) continue;
+    const last = out[out.length - 1];
+    if (last && t - last[1] <= 0.6) last[1] = t + 0.1;
+    else out.push([t, t + 0.1]);
+  }
+  return out.filter(([a, b]) => b - a >= 0.4);
+}
 
 async function startRecording() {
   if (!settings.keys.length) { toast("Hãy nhập Gemini API key trước"); showTab("settings"); return; }
@@ -163,7 +225,20 @@ async function startRecording() {
   if ($("#recMic").checked) {
     try {
       const mic = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
-      rec.streams.push(mic); ctx.createMediaStreamSource(mic).connect(dest);
+      rec.streams.push(mic);
+      const micSrc = ctx.createMediaStreamSource(mic);
+      micSrc.connect(dest);
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 2048;
+      micSrc.connect(analyser);
+      const buf = new Float32Array(analyser.fftSize);
+      rec.mic = [];
+      rec.micTimer = setInterval(() => {
+        analyser.getFloatTimeDomainData(buf);
+        let sum = 0;
+        for (const v of buf) sum += v * v;
+        rec.mic.push([Date.now(), Math.sqrt(sum / buf.length)]);
+      }, 100);
     } catch { toast("Không truy cập được micro, chỉ ghi âm thanh nguồn"); }
   }
   const mixed = new MediaStream([...display.getVideoTracks(), ...dest.stream.getAudioTracks()]);
@@ -173,11 +248,11 @@ async function startRecording() {
   rec.recorder.ondataavailable = (e) => { if (e.data.size) { rec.parts.push(e.data); rec.bytes += e.data.size; } };
   rec.recorder.onstop = finishRecording;
   display.getVideoTracks()[0].onended = () => rec.recorder?.state === "recording" && rec.recorder.stop();
+  rec.t0 = Date.now();
   rec.recorder.start(10_000);
 
   const v = $("#recPreview"); v.srcObject = display; v.play(); v.classList.remove("hidden");
   $("#recStatus").classList.remove("hidden"); $("#recStart").disabled = true; $("#recStop").disabled = false;
-  rec.t0 = Date.now();
   rec.timer = setInterval(() => {
     const s = Math.floor((Date.now() - rec.t0) / 1000);
     $("#recTime").textContent = [s / 3600, (s % 3600) / 60, s % 60].map((x) => String(Math.floor(x)).padStart(2, "0")).join(":");
@@ -187,8 +262,10 @@ async function startRecording() {
 }
 
 function finishRecording() {
-  clearInterval(rec.timer); window.onbeforeunload = null;
+  clearInterval(rec.timer); clearInterval(rec.micTimer); window.onbeforeunload = null;
   const seconds = (Date.now() - rec.t0) / 1000;
+  const micActivity = micIntervals(rec.mic.map(([ms, rms]) => [(ms - rec.t0) / 1000, rms]).filter(([t]) => t >= 0));
+  rec.mic = [];
   rec.streams.forEach((s) => s.getTracks().forEach((t) => t.stop()));
   rec.ctx?.close();
   $("#recPreview").classList.add("hidden"); $("#recStatus").classList.add("hidden");
@@ -198,7 +275,7 @@ function finishRecording() {
   rec.parts = [];
   // offer the raw recording too, so nothing is lost if processing fails
   const keep = $("#jobOutputs");
-  startJob(file, { knownDuration: seconds, sourceName: rec.name }).then(() => {
+  startJob(file, { knownDuration: seconds, sourceName: rec.name, micActivity: micActivity.length ? micActivity : null }).then(() => {
     const b = document.createElement("button"); b.textContent = "⬇ File ghi hình (.webm)";
     b.onclick = () => download(file, file.name); keep.appendChild(b);
   });

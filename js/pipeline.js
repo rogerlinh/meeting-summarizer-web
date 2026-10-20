@@ -3,6 +3,7 @@ import { KeyPool, fileFor, generate, blobToBase64 } from "./gemini.js";
 import { openMedia, captureFrame, candidateTimes, geminiMime, fmtTs, parseTs } from "./media.js";
 import * as prompts from "./prompts.js";
 import { buildDocx } from "./report.js";
+import { speakerStats, suggestNames, mergeSuggestions, applyNames } from "./speakers.js";
 
 /** Split segments the model returned as minutes of speech, spreading timestamps by word count. */
 function splitLong(segs, end, maxWords = 60) {
@@ -30,10 +31,11 @@ function splitLong(segs, end, maxWords = 60) {
 const cleanSpeaker = (s) => String(s || "?").replace(/[`\s]*t?json[`\s]*$/i, "").trim() || "?";
 
 /**
- * Run the whole pipeline. ui = {log(msg), step(msg, pct), keyStatus(pool)}.
+ * Run the whole pipeline. ui = {log(msg), step(msg, pct), keyStatus(pool), reviewSpeakers(list) -> Promise<Map>}.
+ * opts.micActivity: [[start, end], ...] seconds when the user's own microphone had speech.
  * Returns {summary, transcript, docx: Blob, transcriptText}.
  */
-export async function run(file, settings, ui, { knownDuration = 0, sourceName } = {}) {
+export async function run(file, settings, ui, { knownDuration = 0, sourceName, participants = [], micActivity = null } = {}) {
   const pool = new KeyPool(settings.keys);
   const models = settings.models;
   const log = (m) => { ui.log(m); ui.keyStatus(pool); };
@@ -67,16 +69,18 @@ export async function run(file, settings, ui, { knownDuration = 0, sourceName } 
     let done = 0;
     const hasFile = (st) => (st.files.has(file) ? 1 : 0);
 
-    const transcribe = async ([a, b]) => {
+    const transcribe = async ([a, b], idx) => {
       const data = await generate(pool, models, async (st) => {
         const f = await fileFor(st, file, mime, null, log);
         const part = { fileData: { mimeType: f.mimeType || mime, fileUri: f.uri } };
         if (isVideo) part.videoMetadata = { startOffset: `${Math.floor(a)}s`, endOffset: `${Math.ceil(b)}s`, fps: 0.2 };
         return [part, { text: `Hãy gỡ băng phần từ ${fmtTs(a)} đến ${fmtTs(b)} của file. Mốc "t" tính từ đầu file.` }];
-      }, { system: prompts.TRANSCRIBE_SYSTEM, schema: prompts.TRANSCRIBE_SCHEMA, lowMedia: isVideo, prefer: hasFile, log });
+      }, { system: prompts.transcribeSystem(participants), schema: prompts.TRANSCRIBE_SCHEMA, lowMedia: isVideo, prefer: hasFile, log });
 
       let segs = (data.segments || []).filter((s) => s.text?.trim())
         .map((s) => ({ start: parseTs(s.t), speaker: cleanSpeaker(s.speaker), text: s.text.trim() }));
+      // "Người nói 1" in one chunk is not necessarily "Người nói 1" in another: keep them apart until identified
+      if (ranges.length > 1) segs.forEach((s) => { if (/^Người nói d+$/i.test(s.speaker)) s.speaker += ` · đoạn ${idx + 1}`; });
       // some answers use times relative to the clip instead of the file
       if (a > 0 && segs.length && Math.max(...segs.map((s) => s.start)) < b - a + 30 && Math.min(...segs.map((s) => s.start)) < a - 30) {
         segs.forEach((s) => (s.start += a));
@@ -92,12 +96,28 @@ export async function run(file, settings, ui, { knownDuration = 0, sourceName } 
     let next = 0;
     const workers = Math.max(1, Math.min(ranges.length, settings.keys.length, 4));
     await Promise.all(Array.from({ length: workers }, async () => {
-      while (next < ranges.length) { const i = next++; results[i] = await transcribe(ranges[i]); }
+      while (next < ranges.length) { const i = next++; results[i] = await transcribe(ranges[i], i); }
     }));
     const transcript = results.flat();
     if (!transcript.length) throw new Error("Không nhận diện được lời nói nào");
 
-    ui.step("Đang chờ cắt khung hình…", 66);
+    // 4. Who is who: Gemini suggestion + microphone overlap, then the user confirms
+    ui.step("Đang xác định người nói…", 66);
+    let stats = speakerStats(transcript, micActivity);
+    let geminiNames = new Map();
+    try {
+      geminiNames = await suggestNames(pool, models, stats, transcript, participants, log);
+    } catch (e) { log(`Không gợi ý được tên người nói: ${e.message}`); }
+    stats = mergeSuggestions(stats, geminiNames, settings.myName);
+    let names = new Map(stats.map((s) => [s.label, s.suggested]));
+    if (settings.reviewSpeakers && ui.reviewSpeakers) {
+      ui.step("Chờ bạn xác nhận người nói…", 68);
+      names = await ui.reviewSpeakers(stats, participants);
+    }
+    applyNames(transcript, names);
+    log(`Người nói: ${[...new Set(transcript.map((s) => s.speaker))].join(", ")}`);
+
+    ui.step("Đang chờ cắt khung hình…", 69);
     await framesDone;
 
     // 4. Detailed report from transcript + thumbnails
@@ -112,13 +132,9 @@ export async function run(file, settings, ui, { knownDuration = 0, sourceName } 
     }
     parts.push({ text: "Hãy lập báo cáo theo đúng schema." });
     const summary = await generate(pool, models, parts, {
-      system: prompts.summarySystem({ language: settings.language, duration: fmtTs(dur), nSections: Math.max(3, Math.round(dur / 360)) }),
+      system: prompts.summarySystem({ language: settings.language, duration: fmtTs(dur), nSections: Math.max(3, Math.round(dur / 360)), participants }),
       schema: prompts.SUMMARY_SCHEMA, log,
     });
-
-    // unify speaker names (chunks were transcribed independently)
-    const aliases = new Map((summary.speaker_aliases || []).filter((x) => x.from && x.to).map((x) => [x.from.trim(), x.to.trim()]));
-    transcript.forEach((s) => (s.speaker = aliases.get(s.speaker) || s.speaker));
 
     // 5. Every section gets pictures from its own time range
     ui.step("Đang ghép hình minh hoạ…", 88);
@@ -142,7 +158,7 @@ export async function run(file, settings, ui, { knownDuration = 0, sourceName } 
 
     // 6. DOCX
     ui.step("Đang xuất DOCX…", 94);
-    const docx = await buildDocx(summary, frames, transcript, { sourceName: sourceName || file.name, duration: dur }, settings.includeTranscript);
+    const docx = await buildDocx(summary, frames, transcript, { sourceName: sourceName || file.name, duration: dur, participants }, settings.includeTranscript);
     media.close();
     ui.step("Hoàn tất", 100);
     const transcriptText = transcript.map((s) => `[${fmtTs(s.start)}] ${s.speaker}: ${s.text}`).join("\n");
