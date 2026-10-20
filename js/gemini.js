@@ -6,6 +6,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const mask = (k) => (k.length > 12 ? `${k.slice(0, 6)}…${k.slice(-4)}` : "****");
 
 export class GeminiError extends Error {}
+/** Every key is over its limit for one model: the caller moves on to the next model. */
+class ModelBlocked extends GeminiError {}
 
 class HttpError extends Error {
   constructor(status, err) {
@@ -31,16 +33,54 @@ function retryDelay(err) {
   return 30;
 }
 
+/** quotaValue of the violated quota, e.g. "20" requests per day. */
+function quotaLimit(err) {
+  for (const d of err.details || []) for (const v of d.violations || []) if (v.quotaValue) return String(v.quotaValue);
+  return "";
+}
+
+// Model cooldowns are remembered in this browser between runs, so the next report skips models
+// that are out of quota instead of probing them again. Keyed by the masked key + model.
+const QUOTA_STORE = "meeting-summarizer-quota";
+function loadQuota() {
+  try { return JSON.parse(localStorage.getItem(QUOTA_STORE) || "{}"); } catch { return {}; }
+}
+function saveQuota(q) {
+  const now = Date.now();
+  for (const k of Object.keys(q)) if (q[k].until <= now) delete q[k];
+  try { localStorage.setItem(QUOTA_STORE, JSON.stringify(q)); } catch { /* storage unavailable */ }
+}
+
 /** Pool of API keys. Picks the least recently used key that is not cooling down for the model. */
 export class KeyPool {
   constructor(keys) {
-    this.states = keys.map((key) => ({
-      key, label: mask(key), disabled: false, lastUsed: 0, cooldown: {},
-      ok: 0, rateLimited: 0, errors: 0, lastError: "", files: new Map(),
-    }));
+    const saved = loadQuota();
+    const now = Date.now();
+    this.lastModel = "";
+    this.states = keys.map((key) => {
+      const st = {
+        key, label: mask(key), disabled: false, lastUsed: 0, cooldown: {}, quota: {},
+        ok: 0, rateLimited: 0, errors: 0, lastError: "", files: new Map(),
+      };
+      for (const [id, q] of Object.entries(saved)) {
+        const [label, model] = id.split("|");
+        if (label === st.label && q.until > now) { st.cooldown[model] = q.until; st.quota[model] = q; }
+      }
+      return st;
+    });
   }
 
-  async acquire(model, prefer = () => 0, maxWait = 120_000) {
+  /** Least recently used valid key, whatever its model limits (uploads don't count against generate quota). */
+  anyKey() {
+    const live = this.states.filter((s) => !s.disabled);
+    if (!live.length) throw new GeminiError("Không còn API key hợp lệ nào. Kiểm tra lại key trong Cài đặt.");
+    const st = live.reduce((a, b) => (a.lastUsed <= b.lastUsed ? a : b));
+    st.lastUsed = Date.now();
+    return st;
+  }
+
+  /** Short cooldowns are waited out; longer ones raise ModelBlocked so the caller tries another model. */
+  async acquire(model, prefer = () => 0, maxWait = 20_000) {
     const deadline = Date.now() + maxWait;
     for (;;) {
       const now = Date.now();
@@ -54,7 +94,7 @@ export class KeyPool {
       }
       const next = Math.min(...live.map((s) => s.cooldown[model] || 0));
       if (next > deadline) {
-        throw new GeminiError(`Tất cả key đều đang bị giới hạn cho ${model} (mở lại sau ${Math.round((next - now) / 1000)}s).`);
+        throw new ModelBlocked(`Tất cả key đều đang bị giới hạn cho ${model} (mở lại sau ${Math.round((next - now) / 1000)}s).`);
       }
       await sleep(Math.max(500, next - now));
     }
@@ -72,8 +112,14 @@ export class KeyPool {
     if (e.status === 429) {
       st.rateLimited++;
       const perDay = blob.includes("PerDay");
-      st.cooldown[model] = Date.now() + (perDay ? 3600 : Math.max(retryDelay(e.err), 5)) * 1000;
-      log?.(`Key ${st.label} bị giới hạn (${model}), chuyển key khác`);
+      // the daily free quota is a rolling window: retryDelay frees one request, so don't probe too often
+      const until = Date.now() + (perDay ? Math.max(retryDelay(e.err), 300) : Math.max(retryDelay(e.err), 5)) * 1000;
+      st.cooldown[model] = until;
+      st.quota[model] = { until, perDay, limit: quotaLimit(e.err) };
+      const saved = loadQuota();
+      saved[`${st.label}|${model}`] = st.quota[model];
+      saveQuota(saved);
+      log?.(`Key ${st.label} ${perDay ? "hết quota trong ngày" : "bị giới hạn tạm thời"} (${model}), chuyển key khác`);
       return true;
     }
     if (blob.includes("API_KEY_INVALID") || e.status === 401 || e.status === 403) {
@@ -97,6 +143,21 @@ export class KeyPool {
         key: s.label, state: s.disabled ? "disabled" : cd > now ? "cooldown" : "ready",
         cooldown: Math.max(0, Math.round((cd - now) / 1000)),
         ok: s.ok, rateLimited: s.rateLimited, errors: s.errors, lastError: s.lastError,
+      };
+    });
+  }
+
+  /** Per model that hit a limit: how many live keys are blocked, why, and when the first one frees up. */
+  quota() {
+    const now = Date.now();
+    const live = this.states.filter((s) => !s.disabled);
+    const models = [...new Set(live.flatMap((s) => Object.keys(s.cooldown).filter((m) => s.cooldown[m] > now)))];
+    return models.map((model) => {
+      const blocked = live.filter((s) => (s.cooldown[model] || 0) > now);
+      const info = blocked.map((s) => s.quota[model]).find(Boolean) || {};
+      return {
+        model, blocked: blocked.length, keys: live.length, perDay: !!info.perDay, limit: info.limit || "",
+        retry: Math.round((Math.min(...blocked.map((s) => s.cooldown[model])) - now) / 1000),
       };
     });
   }
@@ -183,6 +244,7 @@ async function call(pool, model, buildBody, log, prefer) {
       });
       if (!r.ok) throw await httpError(r);
       st.ok++;
+      pool.lastModel = model;
       return await r.json();
     } catch (e) {
       last = e.message;
@@ -229,13 +291,44 @@ export async function generate(pool, models, parts, { system, schema, temperatur
         if (block) break;
       } catch (e) {
         errors.push(`${model}: ${e.message}`);
+        if (e instanceof ModelBlocked) {
+          // say it once per model, not on every request of the run
+          if (!pool.announced?.has(model)) { (pool.announced ??= new Set()).add(model); log?.(`${e.message} → chuyển sang model khác`); }
+          break;
+        }
         log?.(`Model ${model} lỗi: ${e.message}`);
         if (e instanceof SyntaxError) continue; // malformed JSON: try again
         break;
       }
     }
   }
+  if (errors.length && errors.every((m) => m.includes("bị giới hạn"))) {
+    throw new GeminiError("Tất cả model đều đã hết quota trên mọi API key. Quota miễn phí tính theo ngày cho từng project và từng model; hãy thử lại sau, hoặc thêm key từ project Google khác.");
+  }
   throw new GeminiError(errors.join(" | "));
+}
+
+const FLASH = /^gemini-(\d+(?:\.\d+)?)-flash(-lite)?(-preview)?$/;
+
+/**
+ * The configured models, then any other Gemini 3+ Flash model the key can use (each model has its own quota).
+ * Order of the extras: Flash before Flash-Lite, then newest version first, stable before preview. models.list is free.
+ */
+export async function modelChain(models, key, log) {
+  if (!key) return models;
+  try {
+    const r = await fetch(`${BASE}/v1beta/models?pageSize=200`, { headers: { "x-goog-api-key": key } });
+    if (!r.ok) return models;
+    const extra = ((await r.json()).models || [])
+      .filter((m) => (m.supportedGenerationMethods || []).includes("generateContent"))
+      .map((m) => m.name.replace(/^models\//, ""))
+      .map((id) => [id, FLASH.exec(id)])
+      .filter(([id, x]) => x && parseFloat(x[1]) >= 3 && !models.includes(id))
+      .sort(([, a], [, b]) => !!a[2] - !!b[2] || parseFloat(b[1]) - parseFloat(a[1]) || !!a[3] - !!b[3])
+      .map(([id]) => id);
+    if (extra.length) log?.(`Model dự phòng khi hết quota: ${[...models.slice(1), ...extra].join(", ")}`);
+    return [...models, ...extra];
+  } catch { return models; }
 }
 
 /** Validate keys with a free models.list call. */

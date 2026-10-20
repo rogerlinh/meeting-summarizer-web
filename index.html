@@ -70,6 +70,7 @@
       <div class="job-head"><span class="job-title" id="jobTitle"></span><span id="jobPill" class="pill"></span></div>
       <div class="bar"><div id="jobBar"></div></div>
       <span class="muted" id="jobStep"></span>
+      <div id="quotaNote" class="banner hidden"></div>
       <div id="jobError" class="err hidden"></div>
       <div id="review" class="review hidden">
         <h3>Ai đang nói? Kiểm tra và sửa tên trước khi viết báo cáo</h3>
@@ -114,11 +115,16 @@
         </div>
         <h3>Trạng thái xoay vòng (lượt chạy gần nhất)</h3>
         <table id="keyStatus"><thead><tr><th>Key</th><th>Trạng thái</th><th>OK</th><th>429</th><th>Lỗi</th></tr></thead><tbody></tbody></table>
+        <h3>Quota theo model</h3>
+        <table id="quotaTable"><thead><tr><th>Model</th><th>Key bị chặn</th><th>Lý do</th><th>Thử lại sau</th></tr></thead><tbody></tbody></table>
+        <p class="muted">Gói miễn phí giới hạn số request mỗi ngày cho <b>từng model, từng project</b>. Hết quota ở model này
+          thì trang tự chuyển sang model kế tiếp trong danh sách (và các model Flash khác key dùng được).</p>
       </div>
 
       <div class="card">
         <h2>⚙️ Tuỳ chọn</h2>
         <label>Model (theo thứ tự ưu tiên, cách nhau dấu phẩy)<input id="models"></label>
+        <label class="check"><input type="checkbox" id="autoModels"> Hết quota thì tự dùng thêm các model Gemini Flash khác mà key gọi được</label>
         <label>Tên của bạn (dùng khi ghi họp: lời nói trùng micro của bạn sẽ gắn tên này)<input id="myName" placeholder="vd: Nguyễn Văn Nam"></label>
         <label class="check"><input type="checkbox" id="reviewSpeakers"> Cho tôi xác nhận người nói trước khi viết báo cáo</label>
         <label>Ngôn ngữ báo cáo<input id="language"></label>

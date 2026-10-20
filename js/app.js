@@ -1,5 +1,5 @@
 import { run } from "./pipeline.js";
-import { testKey } from "./gemini.js";
+import { testKey, KeyPool } from "./gemini.js";
 import { youtubeId } from "./media.js";
 
 const $ = (s) => document.querySelector(s);
@@ -8,10 +8,16 @@ const mask = (k) => (k.length > 12 ? `${k.slice(0, 6)}…${k.slice(-4)}` : "****
 
 // ---------- settings (this browser only) ----------
 const STORE = "meeting-summarizer-settings";
-const DEFAULTS = { keys: [], models: ["gemini-3.8-flash", "gemini-3.5-flash-lite"], language: "Tiếng Việt", chunkMinutes: 15,
-  myName: "", reviewSpeakers: true, participants: "" };
+// Every model has its own free quota per project, so a longer chain means more reports per day.
+const DEFAULTS = { keys: [], models: ["gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash",
+  "gemini-3-flash-preview", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite"], autoModels: true,
+  language: "Tiếng Việt", chunkMinutes: 15, myName: "", reviewSpeakers: true, participants: "" };
+const OLD_DEFAULT_MODELS = "gemini-3.8-flash,gemini-3.5-flash-lite";
 function loadSettings() {
-  try { return { ...DEFAULTS, ...JSON.parse(localStorage.getItem(STORE) || "{}") }; } catch { return { ...DEFAULTS }; }
+  let s;
+  try { s = { ...DEFAULTS, ...JSON.parse(localStorage.getItem(STORE) || "{}") }; } catch { s = { ...DEFAULTS }; }
+  if (s.models.join(",") === OLD_DEFAULT_MODELS) s.models = [...DEFAULTS.models]; // untouched old default
+  return s;
 }
 function saveSettings(s) {
   try { localStorage.setItem(STORE, JSON.stringify(s)); } catch { toast("Trình duyệt chặn lưu cài đặt (chế độ ẩn danh?)"); }
@@ -26,6 +32,7 @@ function toast(msg, ms = 3500) {
 function showTab(name) {
   document.querySelectorAll("nav button").forEach((b) => b.classList.toggle("active", b.dataset.tab === name));
   document.querySelectorAll(".tab").forEach((s) => s.classList.toggle("active", s.id === "tab-" + name));
+  if (name === "settings" && !busy) renderQuota(new KeyPool(settings.keys)); // limits remembered from earlier runs
 }
 document.querySelectorAll("nav button").forEach((b) => (b.onclick = () => showTab(b.dataset.tab)));
 
@@ -37,6 +44,7 @@ function renderSettings() {
     settings.keys.splice(+b.dataset.i, 1); saveSettings(settings); renderSettings();
   }));
   $("#models").value = settings.models.join(", ");
+  $("#autoModels").checked = settings.autoModels;
   $("#language").value = settings.language;
   $("#chunkMinutes").value = settings.chunkMinutes;
   $("#myName").value = settings.myName;
@@ -59,6 +67,7 @@ $("#testKeys").onclick = async () => {
 };
 $("#saveSettings").onclick = () => {
   settings.models = $("#models").value.split(",").map((s) => s.trim()).filter(Boolean);
+  settings.autoModels = $("#autoModels").checked;
   if (!settings.models.length) settings.models = [...DEFAULTS.models];
   settings.language = $("#language").value.trim() || DEFAULTS.language;
   settings.chunkMinutes = Math.min(40, Math.max(5, +$("#chunkMinutes").value || 15));
@@ -157,6 +166,25 @@ function renderKeyStatus(pool) {
   $("#keyStatus tbody").innerHTML = pool.status().map((k) => `<tr title="${esc(k.lastError)}"><td><code>${esc(k.key)}</code></td>
     <td><span class="pill ${k.state}">${k.state}${k.cooldown ? " " + k.cooldown + "s" : ""}</span></td>
     <td>${k.ok}</td><td>${k.rateLimited}</td><td>${k.errors}</td></tr>`).join("");
+  renderQuota(pool);
+}
+
+const mins = (s) => (s >= 90 ? `~${Math.round(s / 60)} phút` : `${s} giây`);
+const quotaWhy = (q) => (q.perDay ? `hết quota trong ngày${q.limit ? ` (${q.limit} request/ngày/project)` : ""}` : "giới hạn tạm thời (theo phút)");
+
+/** Quota notice above the job log + the per-model table in Settings. */
+function renderQuota(pool) {
+  const q = pool.quota();
+  const full = q.filter((m) => m.blocked >= m.keys);
+  const msgs = full.map((m) => `⚠ <b>${esc(m.model)}</b> ${quotaWhy(m)} trên cả ${m.keys} key – thử lại được sau ${mins(m.retry)}.`);
+  if (full.length && pool.lastModel && !full.some((m) => m.model === pool.lastModel)) {
+    msgs.push(`App đã tự chuyển sang <b>${esc(pool.lastModel)}</b>.`);
+  }
+  $("#quotaNote").innerHTML = msgs.join("<br>");
+  $("#quotaNote").classList.toggle("hidden", !msgs.length);
+  $("#quotaTable tbody").innerHTML = q.length
+    ? q.map((m) => `<tr><td><code>${esc(m.model)}</code></td><td>${m.blocked}/${m.keys}</td><td>${quotaWhy(m)}</td><td>${mins(m.retry)}</td></tr>`).join("")
+    : '<tr><td colspan="4" class="muted">Chưa model nào bị giới hạn</td></tr>';
 }
 
 function download(blob, name) {

@@ -44,7 +44,11 @@ của chính người dùng.
 1. Tải file lên Gemini Files API.
 2. Chuyển giọng nói thành văn bản theo từng đoạn 15 phút (`videoMetadata` start/end), chạy song song trên nhiều key.
    Gặp lỗi 429 thì đổi sang key khác, key bị từ chối thì loại ra. Khi tất cả key của một model đều hết hạn mức,
-   app chuyển sang model dự phòng.
+   app chuyển ngay sang model kế tiếp: mặc định 7 model Flash (3.8 → 3.7 → 3.6 → 3.5 → 3-preview → 3.5-lite → 3.1-lite)
+   cộng các model Gemini 3+ Flash khác mà key gọi được.
+   - **Quota:** gói miễn phí cho khoảng 20 request/ngày cho *mỗi model, mỗi project*. Hết quota thì trang hiện cảnh báo
+     (model nào, giới hạn, đang dùng model nào thay, khi nào thử lại) và tab Cài đặt có bảng **Quota theo model**.
+     Trạng thái quota được nhớ trong trình duyệt nên lần sau trang bỏ qua ngay model đã hết quota.
 3. Cắt khung hình ứng viên bằng `<video>` và canvas (khoảng 1 hình mỗi 45 giây).
 4. Gemini viết báo cáo trong 2 lượt: lượt đầu đọc toàn bộ bản gỡ băng để lập khung (tổng quan, người nói,
    việc được giao, quyết định, danh sách phần); lượt sau viết **song song** từng phần (đoạn văn chi tiết, ý chính,

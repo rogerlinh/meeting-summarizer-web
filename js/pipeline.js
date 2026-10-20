@@ -1,5 +1,5 @@
 // Processing: upload -> speech-to-text per time range -> frames -> detailed report -> DOCX.
-import { KeyPool, fileFor, generate, blobToBase64 } from "./gemini.js";
+import { KeyPool, fileFor, generate, blobToBase64, modelChain } from "./gemini.js";
 import { openMedia, captureFrame, candidateTimes, geminiMime, fmtTs, parseTs, youtubeInfo, youtubeThumbnail } from "./media.js";
 import * as prompts from "./prompts.js";
 import { buildDocx } from "./report.js";
@@ -38,7 +38,8 @@ const cleanSpeaker = (s) => String(s || "?").replace(/[`\s]*t?json[`\s]*$/i, "")
  */
 export async function run(file, settings, ui, { knownDuration = 0, sourceName, participants = [], micActivity = null } = {}) {
   const pool = new KeyPool(settings.keys);
-  const models = settings.models;
+  const models = settings.autoModels === false ? settings.models
+    : await modelChain(settings.models, settings.keys[0], (m) => ui.log(m));
   const log = (m) => { ui.log(m); ui.keyStatus(pool); };
   const yt = file.youtube ? file : null;
   const mime = yt ? "video/*" : geminiMime(file);
@@ -69,7 +70,7 @@ export async function run(file, settings, ui, { knownDuration = 0, sourceName, p
 
       // 1. Upload with the first key (other keys upload lazily if rotation reaches them)
       ui.step("Đang tải file lên Google Gemini…", 4);
-      const first = await pool.acquire(models[0]);
+      const first = pool.anyKey();
       await fileFor(first, file, mime, (p) => ui.step(`Đang tải file lên Google Gemini… ${Math.round(p * 100)}%`, 4 + p * 14), log);
 
       // 2. Candidate frames, captured while transcription runs
