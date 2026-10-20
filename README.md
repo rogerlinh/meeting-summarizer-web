@@ -25,7 +25,8 @@ của chính người dùng.
 - **Tên của bạn** (tab Cài đặt): khi ghi họp có trộn micro, trang đo lúc micro của bạn có tiếng. Giọng nào
   trùng micro nhiều nhất (≥ 40% và gấp đôi người đứng sau) sẽ được gắn tên bạn.
 - **Xác nhận người nói:** sau bước gỡ băng, trang hiện từng giọng kèm câu mẫu, tên gợi ý và độ tin cậy.
-  Bạn sửa hoặc chọn tên, rồi bấm xác nhận để viết báo cáo. Có thể tắt bước này trong Cài đặt.
+  Bạn sửa hoặc chọn tên, rồi bấm xác nhận để viết báo cáo. Tab đổi tiêu đề và phát tiếng báo; không ai xác nhận
+  sau 5 phút thì trang tự dùng tên gợi ý (bắt đầu gõ tên thì trang chờ bạn). Có thể tắt bước này trong Cài đặt.
 - Báo cáo có thêm hai mục:
   - **Phát biểu theo từng người:** mỗi người trình bày, đề xuất, cam kết điều gì.
   - **Việc của từng người:** bảng việc theo từng người được giao, gồm người giao, thời hạn, câu nói gốc và mốc giờ.
@@ -45,9 +46,12 @@ của chính người dùng.
    Gặp lỗi 429 thì đổi sang key khác, key bị từ chối thì loại ra. Khi tất cả key của một model đều hết hạn mức,
    app chuyển sang model dự phòng.
 3. Cắt khung hình ứng viên bằng `<video>` và canvas (khoảng 1 hình mỗi 45 giây).
-4. Gemini đọc bản gỡ băng và ảnh thu nhỏ, viết báo cáo: tổng quan, các phần theo thời gian (đoạn văn chi tiết,
-   ý chính, trích dẫn, 1–3 hình có chú thích), quyết định, việc cần làm, vấn đề bỏ ngỏ.
+4. Gemini viết báo cáo trong 2 lượt: lượt đầu đọc toàn bộ bản gỡ băng để lập khung (tổng quan, người nói,
+   việc được giao, quyết định, danh sách phần); lượt sau viết **song song** từng phần (đoạn văn chi tiết, ý chính,
+   trích dẫn, 1–3 hình có chú thích), mỗi phần chỉ nhận bản gỡ băng và khung hình của khoảng thời gian đó.
+   Bước gỡ băng và viết từng phần dùng thinking "low" nên nhanh khoảng gấp đôi.
 5. Tạo DOCX ngay trong trình duyệt bằng thư viện [`docx`](https://www.npmjs.com/package/docx).
+   Bản gỡ băng không chèn vào DOCX mà tải riêng dạng .txt.
 
 Google tính hạn mức theo **project**, nên các key cần thuộc các project khác nhau mới tăng được thông lượng.
 

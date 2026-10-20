@@ -9,7 +9,7 @@ const mask = (k) => (k.length > 12 ? `${k.slice(0, 6)}…${k.slice(-4)}` : "****
 // ---------- settings (this browser only) ----------
 const STORE = "meeting-summarizer-settings";
 const DEFAULTS = { keys: [], models: ["gemini-3.8-flash", "gemini-3.5-flash-lite"], language: "Tiếng Việt", chunkMinutes: 15,
-  includeTranscript: true, myName: "", reviewSpeakers: true, participants: "" };
+  myName: "", reviewSpeakers: true, participants: "" };
 function loadSettings() {
   try { return { ...DEFAULTS, ...JSON.parse(localStorage.getItem(STORE) || "{}") }; } catch { return { ...DEFAULTS }; }
 }
@@ -39,7 +39,6 @@ function renderSettings() {
   $("#models").value = settings.models.join(", ");
   $("#language").value = settings.language;
   $("#chunkMinutes").value = settings.chunkMinutes;
-  $("#includeTranscript").checked = settings.includeTranscript;
   $("#myName").value = settings.myName;
   $("#reviewSpeakers").checked = settings.reviewSpeakers;
   if (document.activeElement !== $("#participants")) $("#participants").value = settings.participants;
@@ -63,7 +62,6 @@ $("#saveSettings").onclick = () => {
   if (!settings.models.length) settings.models = [...DEFAULTS.models];
   settings.language = $("#language").value.trim() || DEFAULTS.language;
   settings.chunkMinutes = Math.min(40, Math.max(5, +$("#chunkMinutes").value || 15));
-  settings.includeTranscript = $("#includeTranscript").checked;
   settings.myName = $("#myName").value.trim();
   settings.reviewSpeakers = $("#reviewSpeakers").checked;
   saveSettings(settings); renderSettings();
@@ -100,8 +98,18 @@ function reviewSpeakers(stats, participants) {
     </div>`).join("");
   $("#review").classList.remove("hidden");
   $("#review").scrollIntoView({ behavior: "smooth", block: "start" });
+  const title = document.title;
+  document.title = "⏳ Chờ xác nhận người nói – " + title;
+  chime();
   return new Promise((resolve) => {
-    $("#reviewOk").onclick = () => {
+    // nobody at the screen: go on with the suggested names (and anything already typed) after a while
+    let left = REVIEW_TIMEOUT_S;
+    const tick = () => { $("#reviewAuto").textContent = `Tự động dùng tên gợi ý sau ${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")}`; };
+    tick();
+    const timer = setInterval(() => { left--; tick(); if (left <= 0) finish(); }, 1000);
+    const finish = () => {
+      clearInterval(timer);
+      document.title = title;
       const map = new Map();
       $("#reviewRows").querySelectorAll("input").forEach((inp) => {
         const s = stats[+inp.dataset.i];
@@ -110,7 +118,28 @@ function reviewSpeakers(stats, participants) {
       $("#review").classList.add("hidden");
       resolve(map);
     };
+    $("#reviewOk").onclick = finish;
+    // typing means someone is there: stop the countdown
+    $("#reviewRows").oninput = () => { clearInterval(timer); $("#reviewAuto").textContent = ""; };
   });
+}
+const REVIEW_TIMEOUT_S = 300;
+
+/** Short two-tone sound so the user notices the review panel while in another tab. */
+function chime() {
+  try {
+    const ctx = new AudioContext();
+    [880, 660].forEach((f, i) => {
+      const o = ctx.createOscillator(), g = ctx.createGain();
+      o.frequency.value = f;
+      g.gain.setValueAtTime(0.15, ctx.currentTime + i * 0.25);
+      g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + i * 0.25 + 0.22);
+      o.connect(g).connect(ctx.destination);
+      o.start(ctx.currentTime + i * 0.25);
+      o.stop(ctx.currentTime + i * 0.25 + 0.25);
+    });
+    setTimeout(() => ctx.close(), 1000);
+  } catch { /* no audio */ }
 }
 const fmt = (sec) => { sec = Math.floor(sec); const p = (x) => String(x).padStart(2, "0"); return `${p(Math.floor(sec / 3600))}:${p(Math.floor(sec % 3600 / 60))}:${p(sec % 60)}`; };
 

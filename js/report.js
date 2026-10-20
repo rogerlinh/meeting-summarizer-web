@@ -7,10 +7,10 @@ const loadDocx = async () => (docxLib ??= await import("https://cdn.jsdelivr.net
 const ACCENT = "1F4E79";
 const MUTED = "595959";
 
-export async function buildDocx(summary, frames, transcript, meta, includeTranscript) {
+export async function buildDocx(summary, frames, meta) {
   const D = await loadDocx();
   const { Document, Packer, Paragraph, TextRun, HeadingLevel, ImageRun, Table, TableRow, TableCell,
-    WidthType, AlignmentType, ShadingType, PageBreak } = D;
+    WidthType, AlignmentType, ShadingType } = D;
 
   const P = (text, opts = {}) => new Paragraph({ children: [new TextRun(text)], spacing: { after: 120 }, ...opts });
   const H = (text, level) => new Paragraph({ text, heading: level, spacing: { before: 240, after: 120 } });
@@ -154,17 +154,6 @@ export async function buildDocx(summary, frames, transcript, meta, includeTransc
   if (summary.open_questions?.length) {
     body.push(H(`${n++}. Vấn đề còn bỏ ngỏ`, HeadingLevel.HEADING_1));
     body.push(...bullets(summary.open_questions));
-  }
-
-  if (includeTranscript && transcript.length) {
-    body.push(new Paragraph({ children: [new PageBreak()] }));
-    body.push(H("Phụ lục: Bản gỡ băng (speech-to-text)", HeadingLevel.HEADING_1));
-    for (const s of transcript) {
-      body.push(new Paragraph({
-        spacing: { after: 60 },
-        children: [muted(`[${fmtTs(s.start)}] `), new TextRun({ text: `${s.speaker}: `, bold: true }), new TextRun(s.text)],
-      }));
-    }
   }
 
   const doc = new Document({

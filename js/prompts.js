@@ -44,30 +44,28 @@ export const LINK_SCHEMA = obj({
   mapping: { type: "ARRAY", items: obj({ label: STR, name: STR, confidence: STR, reason: STR }) },
 });
 
-export const summarySystem = ({ language, duration, nSections, participants }) => `Bạn là thư ký biên tập chuyên nghiệp.
-Đầu vào là bản gỡ băng (speech-to-text, có mốc thời gian) của một cuộc họp/video dài ${duration},
-kèm các khung hình cắt từ video (mỗi hình có id và thời điểm). Tên người nói trong bản gỡ băng ĐÃ ĐƯỢC XÁC NHẬN:
-dùng đúng các tên đó, không đổi, không gộp.
-${participantBlock(participants)}
-Hãy viết một BÁO CÁO TỔNG HỢP CHI TIẾT, HOÀN CHỈNH bằng ${language}, đọc xong không cần xem lại video.
+// The report is written in two passes so the long part runs in parallel:
+//   1. outline: whole-meeting items + the list of sections (one request)
+//   2. one request per section, all sections at the same time across keys
 
-NỘI DUNG
-- Loại bỏ nhiễu: chào hỏi, chuyện ngoài lề, câu lặp, từ đệm, trục trặc kỹ thuật ("nghe rõ không", "share màn hình"...),
+const CLEAN_RULES = `- Loại bỏ nhiễu: chào hỏi, chuyện ngoài lề, câu lặp, từ đệm, trục trặc kỹ thuật ("nghe rõ không", "share màn hình"...),
   quảng cáo, kêu gọi like/share. Giữ lại MỌI ý có giá trị: lập luận, dẫn chứng, ví dụ, số liệu, tên người,
   tổ chức, địa điểm, mốc thời gian, kết luận. Luôn nói rõ AI nói/đề xuất/phản đối điều gì.
-- Chia thành khoảng ${nSections} phần theo chủ đề, theo trình tự thời gian (mỗi phần ~5–8 phút nội dung; được
-  nhiều hơn nếu chủ đề thay đổi nhiều). Mỗi phần:
+- Tên người nói trong bản gỡ băng ĐÃ ĐƯỢC XÁC NHẬN: dùng đúng các tên đó, không đổi, không gộp.
+- Tuyệt đối không bịa thông tin không có trong bản gỡ băng hoặc hình.`;
+
+export const outlineSystem = ({ language, duration, nSections, participants }) => `Bạn là thư ký biên tập chuyên nghiệp.
+Đầu vào là bản gỡ băng (speech-to-text, có mốc thời gian) của một cuộc họp/video dài ${duration}.
+${participantBlock(participants)}
+Bước này lập KHUNG cho một báo cáo tổng hợp chi tiết bằng ${language} (nội dung từng phần sẽ được viết ở bước sau).
+${CLEAN_RULES}
+- title: tiêu đề cụ thể của cuộc họp/video. meeting_type: loại (họp nội bộ, hội thảo, livestream, bài giảng...).
+- overview: 1–2 đoạn tóm tắt toàn bộ (bối cảnh, mục đích, kết quả chính).
+- key_takeaways: 4–8 kết luận quan trọng nhất.
+- sections: khoảng ${nSections} phần theo chủ đề, theo trình tự thời gian, nối tiếp nhau và phủ KÍN từ đầu đến cuối
+  (mỗi phần ~5–8 phút nội dung; được nhiều hơn nếu chủ đề thay đổi nhiều). Mỗi phần chỉ gồm:
   • heading: tiêu đề cụ thể nói rõ nội dung (không chung chung như "Phần 1", "Thảo luận").
-  • start / end: mốc HH:MM:SS bắt đầu và kết thúc của phần.
-  • paragraphs: 2–5 đoạn văn, mỗi đoạn 3–6 câu, viết lại mạch lạc bằng văn viết: ai nói gì, vì sao,
-    dẫn chứng nào, đi đến kết luận gì. Không viết chung chung.
-  • key_points: 3–6 gạch đầu dòng ý chính, mỗi ý một câu đầy đủ.
-  • quotes: 0–3 câu nói nguyên văn đáng chú ý (lấy đúng từ bản gỡ băng), kèm người nói và mốc thời gian.
-  • figures: 1–3 hình minh hoạ cho phần đó, chọn từ danh sách khung hình. Ưu tiên hình có thời điểm nằm
-    trong [start, end] của phần và thể hiện đúng nội dung đang nói (slide, biểu đồ, tài liệu, màn hình demo,
-    vật/cảnh được nhắc tới). Nếu video chỉ có người nói, chọn hình rõ nét tại lúc nói ý quan trọng nhất.
-    caption: 1 câu (không ghi mốc thời gian) mô tả hình VÀ liên hệ với nội dung.
-    Không dùng một hình cho hai chỗ; chỉ dùng id có trong danh sách. Nếu không có khung hình nào thì để rỗng.
+  • start / end: mốc HH:MM:SS bắt đầu và kết thúc; end của phần này là start của phần sau.
 - speakers: MỖI người nói trong bản gỡ băng một mục: name (đúng tên trong bản gỡ băng), role (vai trò nếu biết,
   "" nếu không), contributions: 2–6 câu tóm tắt những gì người đó trình bày, đề xuất, phản biện, cam kết.
 - action_items: MỌI việc được giao hoặc tự nhận trong cuộc họp (kể cả lời hứa "để em làm", "anh gửi trước thứ 6").
@@ -77,29 +75,43 @@ NỘI DUNG
   • assigned_by: người giao việc (hoặc chính người đó nếu tự nhận); "" nếu không rõ.
   • deadline: hạn như được nói ("thứ 6 tuần này", "30/10"); "" nếu không nêu.
   • quote: câu nói gốc thể hiện việc giao/nhận (trích từ bản gỡ băng). t: mốc HH:MM:SS của câu đó.
-- overview: 1–2 đoạn tóm tắt toàn bộ (bối cảnh, mục đích, kết quả chính).
-- key_takeaways: 4–8 kết luận quan trọng nhất.
-- decisions / open_questions: mảng rỗng nếu không có.
-- Tuyệt đối không bịa thông tin không có trong bản gỡ băng hoặc hình.`;
+- decisions / open_questions: mảng rỗng nếu không có.`;
 
-export const SUMMARY_SCHEMA = obj({
+export const OUTLINE_SCHEMA = obj({
   title: STR,
   meeting_type: STR,
   overview: STR,
   key_takeaways: STRS,
   speakers: { type: "ARRAY", items: obj({ name: STR, role: STR, contributions: STRS }) },
-  sections: {
-    type: "ARRAY",
-    items: obj({
-      heading: STR, start: STR, end: STR, paragraphs: STRS, key_points: STRS,
-      quotes: { type: "ARRAY", items: obj({ speaker: STR, text: STR, t: STR }) },
-      figures: { type: "ARRAY", items: obj({ frame_id: { type: "INTEGER" }, caption: STR }) },
-    }),
-  },
+  sections: { type: "ARRAY", items: obj({ heading: STR, start: STR, end: STR }) },
   decisions: STRS,
   action_items: {
     type: "ARRAY",
     items: obj({ task: STR, assignee: STR, assigned_by: STR, deadline: STR, quote: STR, t: STR }),
   },
   open_questions: STRS,
+});
+
+export const sectionSystem = ({ language, participants }) => `Bạn là thư ký biên tập chuyên nghiệp, đang viết MỘT PHẦN
+của báo cáo tổng hợp chi tiết bằng ${language} về một cuộc họp/video. Đầu vào: khung báo cáo (tiêu đề, tóm tắt, danh sách
+các phần), phần cần viết (tiêu đề + khoảng thời gian), bản gỡ băng của khoảng thời gian đó và các khung hình cắt từ
+video trong khoảng đó (mỗi hình có id và thời điểm).
+${participantBlock(participants)}
+${CLEAN_RULES}
+- Chỉ viết về nội dung TRONG khoảng thời gian của phần này (lời ngay trước/sau chỉ để hiểu ngữ cảnh), không lặp
+  lại nội dung các phần khác.
+- paragraphs: 2–5 đoạn văn, mỗi đoạn 3–6 câu, viết lại mạch lạc bằng văn viết: ai nói gì, vì sao, dẫn chứng nào,
+  đi đến kết luận gì. Không viết chung chung.
+- key_points: 3–6 gạch đầu dòng ý chính, mỗi ý một câu đầy đủ.
+- quotes: 0–3 câu nói nguyên văn đáng chú ý (lấy đúng từ bản gỡ băng), kèm người nói và mốc thời gian HH:MM:SS.
+- figures: 1–3 hình minh hoạ chọn từ các khung hình được gửi kèm, thể hiện đúng nội dung đang nói (slide, biểu đồ,
+  tài liệu, màn hình demo, vật/cảnh được nhắc tới). Nếu video chỉ có người nói, chọn hình rõ nét tại lúc nói ý
+  quan trọng nhất. caption: 1 câu (không ghi mốc thời gian) mô tả hình VÀ liên hệ với nội dung.
+  Chỉ dùng id có trong danh sách; không có khung hình nào thì để rỗng.`;
+
+export const SECTION_SCHEMA = obj({
+  paragraphs: STRS,
+  key_points: STRS,
+  quotes: { type: "ARRAY", items: obj({ speaker: STR, text: STR, t: STR }) },
+  figures: { type: "ARRAY", items: obj({ frame_id: { type: "INTEGER" }, caption: STR }) },
 });

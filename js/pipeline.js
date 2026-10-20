@@ -102,7 +102,7 @@ export async function run(file, settings, ui, { knownDuration = 0, sourceName, p
         if (isVideo && !whole) part.videoMetadata = { startOffset: `${Math.floor(a)}s`, endOffset: `${Math.ceil(b)}s`, fps: 0.2 };
         const ask = whole ? "Hãy gỡ băng toàn bộ video." : `Hãy gỡ băng phần từ ${fmtTs(a)} đến ${fmtTs(b)} của file.`;
         return [part, { text: `${ask} Mốc "t" tính từ đầu file.` }];
-      }, { system: prompts.transcribeSystem(participants), schema: prompts.TRANSCRIBE_SCHEMA, lowMedia: isVideo, prefer: hasFile, log });
+      }, { system: prompts.transcribeSystem(participants), schema: prompts.TRANSCRIBE_SCHEMA, lowMedia: isVideo, thinking: "low", prefer: hasFile, log });
 
       let segs = (data.segments || []).filter((s) => s.text?.trim())
         .map((s) => ({ start: parseTs(s.t), speaker: cleanSpeaker(s.speaker), text: s.text.trim() }));
@@ -147,39 +147,82 @@ export async function run(file, settings, ui, { knownDuration = 0, sourceName, p
     applyNames(transcript, names);
     log(`Người nói: ${[...new Set(transcript.map((s) => s.speaker))].join(", ")}`);
 
-    ui.step("Đang chờ cắt khung hình…", 69);
+    // 4. Report outline (whole meeting: overview, people, tasks, list of sections); frames keep being cut meanwhile
+    ui.step("Đang lập khung báo cáo…", 70);
+    const line = (s) => `[${fmtTs(s.start)}] ${s.speaker}: ${s.text}`;
+    const summary = await generate(pool, models, [
+      { text: "BẢN GỠ BĂNG:\n" + transcript.map(line).join("\n") },
+      { text: "Hãy lập khung báo cáo theo đúng schema." },
+    ], {
+      system: prompts.outlineSystem({ language: settings.language, duration: fmtTs(dur), nSections: Math.max(3, Math.round(dur / 360)), participants }),
+      schema: prompts.OUTLINE_SCHEMA, log,
+    });
+    const sections = (summary.sections || []).filter((s) => s.heading);
+    if (!sections.length) sections.push({ heading: summary.title || "Nội dung", start: fmtTs(0), end: fmtTs(dur) });
+    summary.sections = sections;
+    log(`Khung báo cáo: ${sections.length} phần, ${(summary.action_items || []).length} việc được giao`);
+
+    ui.step("Đang chờ cắt khung hình…", 74);
     await framesDone;
 
-    // 4. Detailed report from transcript + thumbnails
-    ui.step("Đang viết báo cáo chi tiết…", 70);
-    const parts = [{ text: "BẢN GỠ BĂNG:\n" + transcript.map((s) => `[${fmtTs(s.start)}] ${s.speaker}: ${s.text}`).join("\n") }];
-    if (frames.size) {
-      parts.push({ text: "\nKHUNG HÌNH ỨNG VIÊN (id @ thời điểm):" });
-      for (const [id, fr] of frames) {
-        parts.push({ text: `Frame id=${id} @ ${fmtTs(fr.t)}` });
-        parts.push({ inlineData: { mimeType: "image/jpeg", data: await blobToBase64(fr.thumb) } });
-      }
-    }
-    parts.push({ text: "Hãy lập báo cáo theo đúng schema." });
-    const summary = await generate(pool, models, parts, {
-      system: prompts.summarySystem({ language: settings.language, duration: fmtTs(dur), nSections: Math.max(3, Math.round(dur / 360)), participants }),
-      schema: prompts.SUMMARY_SCHEMA, log,
+    // 5. Every section written at the same time, each with its own slice of transcript and frames
+    const thumbs = new Map();
+    for (const [id, fr] of frames) thumbs.set(id, await blobToBase64(fr.thumb));
+    const toc = `KHUNG BÁO CÁO: ${summary.title}\nTóm tắt: ${summary.overview}\nCác phần:\n` +
+      sections.map((s, i) => `${i + 1}. [${s.start}–${s.end}] ${s.heading}`).join("\n");
+    const bounds = sections.map((s, i) => {
+      const lo = parseTs(s.start);
+      const hi = parseTs(s.end) || (i + 1 < sections.length ? parseTs(sections[i + 1].start) : dur);
+      return [lo, Math.max(hi, lo + 1)];
     });
+    let written = 0;
+    const writeSection = async (i) => {
+      const [lo, hi] = bounds[i];
+      const slice = transcript.filter((s) => s.start >= lo - 30 && s.start < hi + 30);
+      const parts = [
+        { text: toc },
+        { text: `\nPHẦN CẦN VIẾT: ${i + 1}. ${sections[i].heading} (${fmtTs(lo)}–${fmtTs(hi)})` },
+        { text: "\nBẢN GỠ BĂNG CỦA PHẦN NÀY:\n" + (slice.length ? slice.map(line).join("\n") : "(không có lời nói)") },
+      ];
+      const inRange = [...frames].filter(([, fr]) => fr.t >= lo - 5 && fr.t < hi + 5);
+      if (inRange.length) {
+        parts.push({ text: "\nKHUNG HÌNH TRONG PHẦN NÀY (id @ thời điểm):" });
+        for (const [id, fr] of inRange) {
+          parts.push({ text: `Frame id=${id} @ ${fmtTs(fr.t)}` });
+          parts.push({ inlineData: { mimeType: "image/jpeg", data: thumbs.get(id) } });
+        }
+      }
+      parts.push({ text: "Hãy viết phần này theo đúng schema." });
+      const body = await generate(pool, models, parts, {
+        system: prompts.sectionSystem({ language: settings.language, participants }),
+        schema: prompts.SECTION_SCHEMA, thinking: "low", log,
+      });
+      Object.assign(sections[i], {
+        paragraphs: body.paragraphs || [], key_points: body.key_points || [], quotes: body.quotes || [],
+        figures: (body.figures || []).filter((f) => inRange.some(([id]) => id === f.frame_id)),
+      });
+      written++;
+      ui.step(`Đang viết chi tiết từng phần (${written}/${sections.length})…`, 76 + (12 * written) / sections.length);
+    };
+    ui.step(`Đang viết chi tiết từng phần (0/${sections.length})…`, 76);
+    let nextSec = 0;
+    const secWorkers = Math.max(1, Math.min(sections.length, settings.keys.length * 2, 8));
+    await Promise.all(Array.from({ length: secWorkers }, async () => {
+      while (nextSec < sections.length) await writeSection(nextSec++);
+    }));
 
-    // 5. Every section gets pictures from its own time range
-    ui.step("Đang ghép hình minh hoạ…", 88);
+    // 6. Every section gets pictures from its own time range
+    ui.step("Đang ghép hình minh hoạ…", 89);
     const used = new Set();
-    const sections = summary.sections || [];
     for (const sec of sections) {
       sec.figures = (sec.figures || []).filter((f) => frames.has(f.frame_id) && !used.has(f.frame_id) && used.add(f.frame_id));
     }
     sections.forEach((sec, i) => {
       if (sec.figures.length || !frames.size) return;
-      const lo = parseTs(sec.start);
-      const hi = parseTs(sec.end) || (i + 1 < sections.length ? parseTs(sections[i + 1].start) : dur);
+      const [lo, hi] = bounds[i];
       const free = [...frames.keys()].filter((id) => !used.has(id));
       const pool2 = free.length ? free : [...frames.keys()];
-      const inside = pool2.filter((id) => frames.get(id).t >= lo && frames.get(id).t < Math.max(hi, lo + 1));
+      const inside = pool2.filter((id) => frames.get(id).t >= lo && frames.get(id).t < hi);
       const pick = (inside.length ? inside : pool2)
         .reduce((best, id) => (Math.abs(frames.get(id).t - (lo + hi) / 2) < Math.abs(frames.get(best).t - (lo + hi) / 2) ? id : best));
       sec.figures = [{ frame_id: pick, caption: sec.heading || "" }];
@@ -192,9 +235,9 @@ export async function run(file, settings, ui, { knownDuration = 0, sourceName, p
       used.add(1);
     }
 
-    // 6. DOCX
+    // 7. DOCX
     ui.step("Đang xuất DOCX…", 94);
-    const docx = await buildDocx(summary, frames, transcript, { sourceName: sourceName || file.name, duration: dur, participants }, settings.includeTranscript);
+    const docx = await buildDocx(summary, frames, { sourceName: sourceName || file.name, duration: dur, participants });
     media?.close();
     ui.step("Hoàn tất", 100);
     const transcriptText = transcript.map((s) => `[${fmtTs(s.start)}] ${s.speaker}: ${s.text}`).join("\n");

@@ -77,7 +77,8 @@
           cho nhiều nhãn để gộp chúng là một người. Để trống thì giữ nguyên nhãn.</p>
         <div id="reviewRows"></div>
         <datalist id="peopleList"></datalist>
-        <button id="reviewOk" class="primary">Xác nhận & viết báo cáo</button>
+        <div class="row"><button id="reviewOk" class="primary">Xác nhận & viết báo cáo</button></div>
+        <span id="reviewAuto" class="muted"></span>
       </div>
       <div class="outputs" id="jobOutputs"></div>
       <div id="jobPreview" class="preview hidden"></div>
@@ -122,7 +123,6 @@
         <label class="check"><input type="checkbox" id="reviewSpeakers"> Cho tôi xác nhận người nói trước khi viết báo cáo</label>
         <label>Ngôn ngữ báo cáo<input id="language"></label>
         <label>Độ dài mỗi đoạn speech-to-text (phút)<input id="chunkMinutes" type="number" min="5" max="40"></label>
-        <label class="check"><input type="checkbox" id="includeTranscript"> Kèm bản gỡ băng trong DOCX</label>
         <button id="saveSettings" class="primary">Lưu cài đặt</button>
         <span id="saved" class="muted"></span>
         <hr>

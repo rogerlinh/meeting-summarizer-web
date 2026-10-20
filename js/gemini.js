@@ -199,7 +199,7 @@ async function call(pool, model, buildBody, log, prefer) {
  * Generate text, trying each model in order. `parts` is an array or `async (keyState) => array`.
  * Returns parsed JSON when a schema is given.
  */
-export async function generate(pool, models, parts, { system, schema, temperature = 0.3, lowMedia, prefer, log } = {}) {
+export async function generate(pool, models, parts, { system, schema, temperature = 0.3, lowMedia, thinking, prefer, log } = {}) {
   const errors = [];
   for (const model of models) {
     for (let attempt = 0; attempt < 3; attempt++) {
@@ -212,6 +212,8 @@ export async function generate(pool, models, parts, { system, schema, temperatur
           if (system) body.systemInstruction = { parts: [{ text: system }] };
           if (schema) Object.assign(body.generationConfig, { responseMimeType: "application/json", responseSchema: schema });
           if (lowMedia) body.generationConfig.mediaResolution = "MEDIA_RESOLUTION_LOW";
+          // "low" roughly halves the time of plain transcription with the same output
+          if (thinking) body.generationConfig.thinkingConfig = { thinkingLevel: thinking };
           return body;
         }, log, prefer);
         const cand = (data.candidates || [{}])[0];
