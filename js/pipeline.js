@@ -1,6 +1,6 @@
 // Processing: upload -> speech-to-text per time range -> frames -> detailed report -> DOCX.
 import { KeyPool, fileFor, generate, blobToBase64 } from "./gemini.js";
-import { openMedia, captureFrame, candidateTimes, geminiMime, fmtTs, parseTs } from "./media.js";
+import { openMedia, captureFrame, candidateTimes, geminiMime, fmtTs, parseTs, youtubeInfo, youtubeThumbnail } from "./media.js";
 import * as prompts from "./prompts.js";
 import { buildDocx } from "./report.js";
 import { speakerStats, suggestNames, mergeSuggestions, applyNames } from "./speakers.js";
@@ -32,6 +32,7 @@ const cleanSpeaker = (s) => String(s || "?").replace(/[`\s]*t?json[`\s]*$/i, "")
 
 /**
  * Run the whole pipeline. ui = {log(msg), step(msg, pct), keyStatus(pool), reviewSpeakers(list) -> Promise<Map>}.
+ * `file` is a File/Blob, or {youtube: id, url, name} for a public YouTube video that Gemini reads by link.
  * opts.micActivity: [[start, end], ...] seconds when the user's own microphone had speech.
  * Returns {summary, transcript, docx: Blob, transcriptText}.
  */
@@ -39,56 +40,84 @@ export async function run(file, settings, ui, { knownDuration = 0, sourceName, p
   const pool = new KeyPool(settings.keys);
   const models = settings.models;
   const log = (m) => { ui.log(m); ui.keyStatus(pool); };
-  const mime = geminiMime(file);
-  const isVideo = mime.startsWith("video/");
+  const yt = file.youtube ? file : null;
+  const mime = yt ? "video/*" : geminiMime(file);
+  const isVideo = !!yt || mime.startsWith("video/");
+  let media = null;
 
   try {
-    ui.step("Đang đọc file…", 2);
-    const media = await openMedia(file, knownDuration);
-    const dur = media.duration;
-    if (!dur) throw new Error("Không xác định được thời lượng file");
-    log(`Thời lượng ${fmtTs(dur)}, ${media.hasVideo ? "có hình" : "chỉ có âm thanh"}, ${(file.size / 1e6).toFixed(1)} MB (${mime})`);
-
-    // 1. Upload with the first key (other keys upload lazily if rotation reaches them)
-    ui.step("Đang tải file lên Google Gemini…", 4);
-    const first = await pool.acquire(models[0]);
-    await fileFor(first, file, mime, (p) => ui.step(`Đang tải file lên Google Gemini… ${Math.round(p * 100)}%`, 4 + p * 14), log);
-
-    // 2. Candidate frames, captured while transcription runs
+    let dur;
     const frames = new Map();
-    const framesDone = media.hasVideo ? (async () => {
-      for (const [i, t] of candidateTimes(dur).entries()) frames.set(i + 1, await captureFrame(media, t));
-      log(`Đã cắt ${frames.size} khung hình ứng viên`);
-    })() : Promise.resolve();
+    let framesDone = Promise.resolve();
+    let cover = null;
+    if (yt) {
+      // Gemini fetches the video from YouTube itself: nothing to upload. Frames cannot be cut from a
+      // cross-origin player, so the report uses the video's thumbnail only.
+      ui.step("Đang đọc thông tin video YouTube…", 4);
+      const info = await youtubeInfo(yt.youtube);
+      dur = info.duration;
+      if (info.title && !sourceName) sourceName = info.title;
+      log(dur ? `Video YouTube ${fmtTs(dur)}${info.title ? `: ${info.title}` : ""}`
+        : "Không đọc được thời lượng video YouTube: gỡ băng cả video trong một lượt");
+      framesDone = youtubeThumbnail(yt.youtube).then((t) => { cover = t; });
+    } else {
+      ui.step("Đang đọc file…", 2);
+      media = await openMedia(file, knownDuration);
+      dur = media.duration;
+      if (!dur) throw new Error("Không xác định được thời lượng file");
+      log(`Thời lượng ${fmtTs(dur)}, ${media.hasVideo ? "có hình" : "chỉ có âm thanh"}, ${(file.size / 1e6).toFixed(1)} MB (${mime})`);
+
+      // 1. Upload with the first key (other keys upload lazily if rotation reaches them)
+      ui.step("Đang tải file lên Google Gemini…", 4);
+      const first = await pool.acquire(models[0]);
+      await fileFor(first, file, mime, (p) => ui.step(`Đang tải file lên Google Gemini… ${Math.round(p * 100)}%`, 4 + p * 14), log);
+
+      // 2. Candidate frames, captured while transcription runs
+      if (media.hasVideo) framesDone = (async () => {
+        for (const [i, t] of candidateTimes(dur).entries()) frames.set(i + 1, await captureFrame(media, t));
+        log(`Đã cắt ${frames.size} khung hình ứng viên`);
+      })();
+    }
 
     // 3. Speech-to-text by time range, in parallel across keys
     const chunk = settings.chunkMinutes * 60;
     const ranges = [];
     for (let a = 0; a < dur; a += chunk) ranges.push([a, Math.min(dur, a + chunk)]);
+    // a tail of a few seconds is rejected by Gemini (400): fold it into the previous range
+    if (ranges.length > 1 && ranges[ranges.length - 1][1] - ranges[ranges.length - 1][0] < 60) ranges[ranges.length - 2][1] = ranges.pop()[1];
+    if (!ranges.length) ranges.push([0, Infinity]); // unknown length: whole video at once
     ui.step(`Đang chuyển giọng nói thành văn bản (${ranges.length} đoạn)…`, 20);
     let done = 0;
     const hasFile = (st) => (st.files.has(file) ? 1 : 0);
 
     const transcribe = async ([a, b], idx) => {
+      const whole = !Number.isFinite(b);
       const data = await generate(pool, models, async (st) => {
-        const f = await fileFor(st, file, mime, null, log);
-        const part = { fileData: { mimeType: f.mimeType || mime, fileUri: f.uri } };
-        if (isVideo) part.videoMetadata = { startOffset: `${Math.floor(a)}s`, endOffset: `${Math.ceil(b)}s`, fps: 0.2 };
-        return [part, { text: `Hãy gỡ băng phần từ ${fmtTs(a)} đến ${fmtTs(b)} của file. Mốc "t" tính từ đầu file.` }];
+        let part;
+        if (yt) part = { fileData: { fileUri: yt.url } };
+        else {
+          const f = await fileFor(st, file, mime, null, log);
+          part = { fileData: { mimeType: f.mimeType || mime, fileUri: f.uri } };
+        }
+        if (isVideo && !whole) part.videoMetadata = { startOffset: `${Math.floor(a)}s`, endOffset: `${Math.ceil(b)}s`, fps: 0.2 };
+        const ask = whole ? "Hãy gỡ băng toàn bộ video." : `Hãy gỡ băng phần từ ${fmtTs(a)} đến ${fmtTs(b)} của file.`;
+        return [part, { text: `${ask} Mốc "t" tính từ đầu file.` }];
       }, { system: prompts.transcribeSystem(participants), schema: prompts.TRANSCRIBE_SCHEMA, lowMedia: isVideo, prefer: hasFile, log });
 
       let segs = (data.segments || []).filter((s) => s.text?.trim())
         .map((s) => ({ start: parseTs(s.t), speaker: cleanSpeaker(s.speaker), text: s.text.trim() }));
       // "Người nói 1" in one chunk is not necessarily "Người nói 1" in another: keep them apart until identified
-      if (ranges.length > 1) segs.forEach((s) => { if (/^Người nói d+$/i.test(s.speaker)) s.speaker += ` · đoạn ${idx + 1}`; });
+      if (ranges.length > 1) segs.forEach((s) => { if (/^Người nói \d+$/i.test(s.speaker)) s.speaker += ` · đoạn ${idx + 1}`; });
       // some answers use times relative to the clip instead of the file
       if (a > 0 && segs.length && Math.max(...segs.map((s) => s.start)) < b - a + 30 && Math.min(...segs.map((s) => s.start)) < a - 30) {
         segs.forEach((s) => (s.start += a));
       }
-      segs = splitLong(segs.filter((s) => s.start >= a - 30 && s.start <= b + 30).sort((x, y) => x.start - y.start), b);
+      segs.sort((x, y) => x.start - y.start);
+      const end = whole ? (segs.length ? segs[segs.length - 1].start + 15 : 0) : b;
+      segs = splitLong(segs.filter((s) => s.start >= a - 30 && s.start <= end + 30), end);
       done++;
       ui.step(`Đang chuyển giọng nói thành văn bản (${done}/${ranges.length} đoạn)…`, 20 + (45 * done) / ranges.length);
-      log(`Xong đoạn ${fmtTs(a)}–${fmtTs(b)}: ${segs.length} lượt nói, ${segs.reduce((n, s) => n + s.text.split(/\s+/).length, 0)} từ`);
+      log(`Xong đoạn ${fmtTs(a)}–${fmtTs(end)}: ${segs.length} lượt nói, ${segs.reduce((n, s) => n + s.text.split(/\s+/).length, 0)} từ`);
       return segs;
     };
 
@@ -100,6 +129,7 @@ export async function run(file, settings, ui, { knownDuration = 0, sourceName, p
     }));
     const transcript = results.flat();
     if (!transcript.length) throw new Error("Không nhận diện được lời nói nào");
+    if (!dur) dur = transcript[transcript.length - 1].start + 15;
 
     // 4. Who is who: Gemini suggestion + microphone overlap, then the user confirms
     ui.step("Đang xác định người nói…", 66);
@@ -156,10 +186,16 @@ export async function run(file, settings, ui, { knownDuration = 0, sourceName, p
       used.add(pick);
     });
 
+    if (cover && sections.length) {
+      frames.set(1, cover);
+      sections[0].figures = [{ frame_id: 1, caption: "Ảnh đại diện của video trên YouTube" }];
+      used.add(1);
+    }
+
     // 6. DOCX
     ui.step("Đang xuất DOCX…", 94);
     const docx = await buildDocx(summary, frames, transcript, { sourceName: sourceName || file.name, duration: dur, participants }, settings.includeTranscript);
-    media.close();
+    media?.close();
     ui.step("Hoàn tất", 100);
     const transcriptText = transcript.map((s) => `[${fmtTs(s.start)}] ${s.speaker}: ${s.text}`).join("\n");
     return { summary, transcript, transcriptText, docx, figures: used.size };

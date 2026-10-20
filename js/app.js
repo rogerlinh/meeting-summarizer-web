@@ -1,5 +1,6 @@
 import { run } from "./pipeline.js";
 import { testKey } from "./gemini.js";
+import { youtubeId } from "./media.js";
 
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
@@ -118,6 +119,7 @@ let busy = false;
 function setBusy(b) {
   busy = b;
   $("#upBtn").disabled = b || !chosen;
+  $("#ytBtn").disabled = b;
   $("#recStart").disabled = b || !!rec.recorder;
   window.onbeforeunload = b ? () => "Đang xử lý" : null;
 }
@@ -187,6 +189,15 @@ drop.ondragover = (e) => { e.preventDefault(); drop.classList.add("over"); };
 drop.ondragleave = () => drop.classList.remove("over");
 drop.ondrop = (e) => { e.preventDefault(); drop.classList.remove("over"); choose(e.dataTransfer.files[0]); };
 $("#upBtn").onclick = () => chosen && startJob(chosen);
+
+// ---------- YouTube link ----------
+$("#ytBtn").onclick = () => {
+  const id = youtubeId($("#ytUrl").value);
+  if (!id) { toast("Link không phải video YouTube. Video Drive/Facebook/Vimeo hãy tải về rồi dùng ô Tải lên."); return; }
+  const url = `https://www.youtube.com/watch?v=${id}`;
+  startJob({ youtube: id, url, name: url });
+};
+$("#ytUrl").onkeydown = (e) => e.key === "Enter" && $("#ytBtn").click();
 
 // ---------- meeting recording (kept in memory, processed on stop) ----------
 const rec = { recorder: null, streams: [], ctx: null, parts: [], bytes: 0, t0: 0, timer: null, name: "", mic: [], micTimer: null };

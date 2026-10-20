@@ -54,6 +54,16 @@
         </label>
         <button id="upBtn" class="primary" disabled>Tạo báo cáo</button>
       </div>
+
+      <div class="card">
+        <h2>🔗 Từ link YouTube</h2>
+        <p class="muted">Video YouTube <b>công khai</b>: Gemini đọc thẳng từ link, không cần tải về. Báo cáo dùng ảnh đại diện
+          của video thay cho khung hình cắt từng phần.</p>
+        <input id="ytUrl" placeholder="https://www.youtube.com/watch?v=…" inputmode="url">
+        <button id="ytBtn" class="primary">Tạo báo cáo từ link</button>
+        <p class="muted">Google Drive, Facebook, Vimeo… trang web không tải trực tiếp được: hãy tải video về máy rồi dùng
+          ô <b>Tải lên</b> bên cạnh.</p>
+      </div>
     </div>
 
     <div id="jobCard" class="card job hidden">
@@ -77,7 +87,7 @@
     <div class="card flow">
       <h3>Cách hoạt động</h3>
       <ol>
-        <li>Tải video lên Google Gemini (Files API) bằng key của bạn</li>
+        <li>Tải video lên Google Gemini (Files API) bằng key của bạn; link YouTube thì Gemini tự đọc</li>
         <li>Speech-to-text + tách người nói, chia đoạn chạy song song trên nhiều key</li>
         <li>Cắt khung hình ứng viên ngay trong trình duyệt</li>
         <li>Viết báo cáo chi tiết, lọc nhiễu, chọn hình khớp từng phần</li>

@@ -13,6 +13,9 @@ của chính người dùng.
    - **Ghi cuộc họp trực tuyến:** ghi tab Google Meet / Zoom web / Teams. Khi chọn nguồn, tích "Chia sẻ âm thanh".
      Dùng Chrome hoặc Edge trên máy tính.
    - **Tải lên video/audio:** MP4, WEBM, MKV, MOV, MP3, M4A, WAV… tối đa 2 GB.
+   - **Link YouTube** (video công khai): Gemini đọc thẳng từ link, không cần tải về. Trình duyệt không cắt được
+     khung hình từ YouTube, nên báo cáo dùng ảnh đại diện của video. Google Drive, Facebook, Vimeo… không tải
+     trực tiếp được từ trình duyệt: hãy tải video về rồi dùng ô Tải lên.
 4. Đợi xử lý xong, file DOCX tự tải về. Bản gỡ băng (.txt) có nút tải riêng.
 
 ## Ai nói gì, giao việc cho ai

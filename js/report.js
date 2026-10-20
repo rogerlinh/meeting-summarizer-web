@@ -36,7 +36,7 @@ export async function buildDocx(summary, frames, transcript, meta, includeTransc
       }),
       new Paragraph({
         alignment: AlignmentType.CENTER, spacing: { after: 200 },
-        children: [muted(`Hình ${no}. ${caption} (tại ${fmtTs(fr.t)})`, 18, true)],
+        children: [muted(`Hình ${no}. ${caption}${fr.cover ? "" : ` (tại ${fmtTs(fr.t)})`}`, 18, true)],
       }),
     ];
   }

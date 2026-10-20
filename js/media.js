@@ -72,6 +72,84 @@ export async function captureFrame(media, t) {
   };
 }
 
+/** Video id from youtube.com/watch?v=, youtu.be/, /shorts/, /live/ or /embed/ links; null if not YouTube. */
+export function youtubeId(link) {
+  try {
+    const u = new URL(String(link).trim());
+    const host = u.hostname.replace(/^(www|m|music)\./, "");
+    let id = null;
+    if (host === "youtu.be") id = u.pathname.slice(1);
+    else if (host === "youtube.com" || host === "youtube-nocookie.com") {
+      id = u.searchParams.get("v") || (u.pathname.match(/^\/(?:shorts|live|embed)\/([\w-]+)/) || [])[1];
+    }
+    return /^[\w-]{11}$/.test(id || "") ? id : null;
+  } catch { return null; }
+}
+
+let ytApi = null;
+function loadYouTubeApi() {
+  if (window.YT?.Player) return Promise.resolve(window.YT);
+  return (ytApi ||= new Promise((resolve, reject) => {
+    window.onYouTubeIframeAPIReady = () => resolve(window.YT);
+    const s = document.createElement("script");
+    s.src = "https://www.youtube.com/iframe_api";
+    s.onerror = () => { ytApi = null; reject(new Error("Không tải được YouTube API")); };
+    document.head.append(s);
+  }));
+}
+
+/** Duration and title of a YouTube video via a hidden embedded player. duration is 0 when it cannot be read. */
+export async function youtubeInfo(id) {
+  let YT;
+  try { YT = await loadYouTubeApi(); } catch { return { duration: 0, title: "" }; }
+  const box = document.createElement("div");
+  box.style.cssText = "position:fixed;left:-10000px;top:0;width:320px;height:180px";
+  const slot = document.createElement("div");
+  box.append(slot);
+  document.body.append(box);
+  try {
+    return await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => resolve({ duration: 0, title: "" }), 20000);
+      const player = new YT.Player(slot, {
+        videoId: id, playerVars: { autoplay: 0, controls: 0 },
+        events: {
+          onReady: () => {
+            const read = (n) => {
+              const d = player.getDuration?.() || 0;
+              if (d > 0 || n > 20) {
+                clearTimeout(timer);
+                resolve({ duration: d, title: player.getVideoData?.().title || "" });
+              } else setTimeout(() => read(n + 1), 250);
+            };
+            read(0);
+          },
+          onError: (e) => {
+            clearTimeout(timer);
+            // 100: removed or private. 101/150: embedding disabled, Gemini may still read it.
+            if (e.data === 100) reject(new Error("Video YouTube không tồn tại hoặc đang ở chế độ riêng tư"));
+            else resolve({ duration: 0, title: "" });
+          },
+        },
+      });
+    });
+  } finally { box.remove(); }
+}
+
+/** The video's YouTube thumbnail as a frame (t = 0), or null. i.ytimg.com allows cross-origin reads. */
+export async function youtubeThumbnail(id) {
+  for (const name of ["maxresdefault", "sddefault", "hqdefault"]) {
+    try {
+      const r = await fetch(`https://i.ytimg.com/vi/${id}/${name}.jpg`);
+      if (!r.ok) continue;
+      const blob = await r.blob();
+      const bmp = await createImageBitmap(blob);
+      if (bmp.width <= 120) continue; // placeholder image for missing sizes
+      return { t: 0, cover: true, width: bmp.width, height: bmp.height, full: blob, thumb: blob };
+    } catch { /* try a smaller size */ }
+  }
+  return null;
+}
+
 /** Evenly spaced candidate times: about one every 45 s, between 40 and 90 frames. */
 export function candidateTimes(duration) {
   const n = Math.min(90, Math.max(Math.min(40, Math.floor(duration / 20)), Math.floor(duration / 45)));
