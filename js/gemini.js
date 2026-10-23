@@ -175,55 +175,85 @@ export class KeyPool {
   }
 }
 
+/** 5xx, 408, 429 and network errors are worth retrying; a bad key or an unsupported file is not. */
+const transient = (e) =>
+  e instanceof TypeError || e.transient || (e instanceof HttpError && (e.status >= 500 || e.status === 408 || e.status === 429));
+
+async function retrying(what, fn, log, tries = 5) {
+  for (let i = 1; ; i++) {
+    try {
+      return await fn();
+    } catch (e) {
+      if (!transient(e)) throw e;
+      if (i >= tries) {
+        throw new GeminiError(`${what} thất bại: máy chủ Google Gemini đang quá tải hoặc gián đoạn (${e.message.trim()}). ` +
+          "Lỗi này do phía Google, không phải do key hay file; hãy thử lại sau vài phút.");
+      }
+      const wait = Math.min(2 ** i * 2000, 30_000);
+      log?.(`${what}: ${e.message.trim()} – Google đang quá tải, thử lại sau ${wait / 1000}s (lần ${i}/${tries - 1})`);
+      await sleep(wait);
+    }
+  }
+}
+
 /** Upload a file with one key (Files API, resumable) and wait until Gemini has processed it. */
-function uploadWithKey(key, file, mime, onProgress) {
+function uploadWithKey(key, file, mime, onProgress, log) {
   return (async () => {
-    const start = await fetch(`${BASE}/upload/v1beta/files`, {
-      method: "POST",
-      headers: {
-        "x-goog-api-key": key,
-        "X-Goog-Upload-Protocol": "resumable",
-        "X-Goog-Upload-Command": "start",
-        "X-Goog-Upload-Header-Content-Length": String(file.size),
-        "X-Goog-Upload-Header-Content-Type": mime,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ file: { display_name: (file.name || "recording").slice(0, 100) } }),
-    });
-    if (!start.ok) throw await httpError(start);
-    const url = start.headers.get("X-Goog-Upload-URL");
-    if (!url) throw new GeminiError("Không nhận được địa chỉ tải lên từ Google");
-
-    let info = await new Promise((resolve, reject) => {
-      const xhr = new XMLHttpRequest();
-      xhr.open("POST", url);
-      xhr.setRequestHeader("X-Goog-Upload-Command", "upload, finalize");
-      xhr.setRequestHeader("X-Goog-Upload-Offset", "0");
-      xhr.upload.onprogress = (e) => e.lengthComputable && onProgress?.(e.loaded / e.total);
-      xhr.onload = () => {
-        if (xhr.status === 200) resolve(JSON.parse(xhr.responseText).file);
-        else reject(new HttpError(xhr.status, { message: xhr.responseText.slice(0, 300) }));
-      };
-      xhr.onerror = () => reject(new GeminiError("Lỗi mạng khi tải file lên Google"));
-      xhr.send(file);
-    });
-
+    let info = await retrying("Tải file lên Google", () => uploadOnce(key, file, mime, onProgress), log);
     while (info.state === "PROCESSING") {
       await sleep(4000);
-      const r = await fetch(`${BASE}/v1beta/${info.name}`, { headers: { "x-goog-api-key": key } });
-      if (!r.ok) throw await httpError(r);
-      info = await r.json();
+      info = await retrying("Kiểm tra file trên Google", async () => {
+        const r = await fetch(`${BASE}/v1beta/${info.name}`, { headers: { "x-goog-api-key": key } });
+        if (!r.ok) throw await httpError(r);
+        return r.json();
+      }, log);
     }
     if (info.state === "FAILED") throw new GeminiError("Google không xử lý được file này (định dạng không hỗ trợ?)");
     return info;
   })();
 }
 
+async function uploadOnce(key, file, mime, onProgress) {
+  const start = await fetch(`${BASE}/upload/v1beta/files`, {
+    method: "POST",
+    headers: {
+      "x-goog-api-key": key,
+      "X-Goog-Upload-Protocol": "resumable",
+      "X-Goog-Upload-Command": "start",
+      "X-Goog-Upload-Header-Content-Length": String(file.size),
+      "X-Goog-Upload-Header-Content-Type": mime,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ file: { display_name: (file.name || "recording").slice(0, 100) } }),
+  });
+  if (!start.ok) throw await httpError(start);
+  const url = start.headers.get("X-Goog-Upload-URL");
+  if (!url) throw new GeminiError("Không nhận được địa chỉ tải lên từ Google");
+
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", url);
+    xhr.setRequestHeader("X-Goog-Upload-Command", "upload, finalize");
+    xhr.setRequestHeader("X-Goog-Upload-Offset", "0");
+    xhr.upload.onprogress = (e) => e.lengthComputable && onProgress?.(e.loaded / e.total);
+    xhr.onload = () => {
+      if (xhr.status === 200) resolve(JSON.parse(xhr.responseText).file);
+      else {
+        let err;
+        try { err = JSON.parse(xhr.responseText).error; } catch {}
+        reject(new HttpError(xhr.status, err || { message: xhr.responseText.slice(0, 300) }));
+      }
+    };
+    xhr.onerror = () => reject(Object.assign(new Error("Lỗi mạng khi tải file lên Google"), { transient: true }));
+    xhr.send(file);
+  });
+}
+
 /** The uploaded file for this key (files belong to the key's project, so each key needs its own copy). */
 export function fileFor(st, file, mime, onProgress, log) {
   if (!st.files.has(file)) {
     log?.(`Đang tải file lên Google bằng key ${st.label}…`);
-    const p = uploadWithKey(st.key, file, mime, onProgress);
+    const p = uploadWithKey(st.key, file, mime, onProgress, log);
     p.catch(() => st.files.delete(file));
     st.files.set(file, p);
   }
