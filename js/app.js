@@ -1,6 +1,7 @@
 import { run } from "./pipeline.js";
 import { testKey, KeyPool } from "./gemini.js";
 import { youtubeId } from "./media.js";
+import * as store from "./store.js";
 
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
@@ -159,7 +160,13 @@ function setBusy(b) {
   $("#upBtn").disabled = b || !chosen;
   $("#ytBtn").disabled = b;
   $("#recStart").disabled = b || !!rec.recorder;
-  window.onbeforeunload = b ? () => "Đang xử lý" : null;
+  updateLeaveGuard();
+}
+
+/** Ask before leaving while recording, while a job runs, or while a recording exists only in memory. */
+function updateLeaveGuard() {
+  const why = rec.recorder ? "Đang ghi cuộc họp" : busy ? "Đang xử lý" : rec.unsaved ? "Bản ghi chưa được lưu" : "";
+  window.onbeforeunload = why ? (e) => { e.preventDefault(); return (e.returnValue = why); } : null;
 }
 
 function renderKeyStatus(pool) {
@@ -197,6 +204,8 @@ async function startJob(file, opts = {}) {
   if (busy) return;
   if (!settings.keys.length) { toast("Hãy nhập Gemini API key trước"); showTab("settings"); return; }
   setBusy(true);
+  const { recordingId, saved, ...runOpts } = opts;
+  jobRecId = recordingId; renderSaved();
   const card = $("#jobCard"); card.classList.remove("hidden");
   $("#jobTitle").textContent = opts.sourceName || file.name;
   $("#jobPill").className = "pill running"; $("#jobPill").textContent = "Đang xử lý";
@@ -210,7 +219,7 @@ async function startJob(file, opts = {}) {
     reviewSpeakers,
   };
   try {
-    const res = await run(file, settings, ui, { participants: participantList(), ...opts });
+    const res = await run(file, settings, ui, { participants: participantList(), ...runOpts });
     let base = (res.summary.title || "bao_cao").replace(/[\\/:*?"<>|]+/g, "_").trim();
     if (base.length > 80) base = base.slice(0, 80).replace(/\s+\S*$/, ""); // cut on a word boundary
     base = base || "bao_cao";
@@ -223,12 +232,21 @@ async function startJob(file, opts = {}) {
       <p>${esc(s.overview)}</p><ol>${(s.sections || []).map((x) => `<li><b>${esc(x.start)}</b> ${esc(x.heading)}</li>`).join("")}</ol>`;
     $("#jobPreview").classList.remove("hidden");
     download(res.docx, `${base}.docx`);
+    if (recordingId) {
+      // the report exists now: the saved recording is no longer needed (the .webm button stays for this session)
+      await saved?.catch(() => {});
+      await store.deleteRecording(recordingId).catch(() => {});
+    }
+    return true;
   } catch (e) {
     console.error(e);
     $("#jobPill").className = "pill error"; $("#jobPill").textContent = "Lỗi";
     $("#jobError").textContent = e.message; $("#jobError").classList.remove("hidden");
     ui.log("LỖI: " + e.message);
+    if (recordingId) ui.log("Bản ghi vẫn được lưu trong trình duyệt: mục “Bản ghi chưa xử lý” ở đầu trang, tải lại trang không mất.");
+    return false;
   } finally {
+    jobRecId = null; renderSaved();
     setBusy(false);
   }
 }
@@ -256,8 +274,20 @@ $("#ytBtn").onclick = () => {
 };
 $("#ytUrl").onkeydown = (e) => e.key === "Enter" && $("#ytBtn").click();
 
-// ---------- meeting recording (kept in memory, processed on stop) ----------
-const rec = { recorder: null, streams: [], ctx: null, parts: [], bytes: 0, t0: 0, timer: null, name: "", mic: [], micTimer: null };
+// ---------- meeting recording (saved to IndexedDB every 10 s, processed on stop) ----------
+const rec = { recorder: null, streams: [], ctx: null, parts: [], bytes: 0, t0: 0, timer: null, name: "", mic: [], micTimer: null,
+  id: null, saving: Promise.resolve(), unsaved: false };
+
+/** IndexedDB refused a chunk (private window, disk full…): stop saving and keep the user from losing the in-memory copy. */
+function saveFailed(e) {
+  console.error(e);
+  if (rec.id) store.updateRecording(rec.id, { broken: true }).catch(() => {});
+  rec.id = null; rec.unsaved = true;
+  updateLeaveGuard();
+  toast("Không lưu được bản ghi vào trình duyệt. Đừng tải lại trang; khi xong hãy bấm ⬇ File ghi hình để tải về.", 8000);
+}
+
+const micActivityNow = () => micIntervals(rec.mic.map(([ms, rms]) => [(ms - rec.t0) / 1000, rms]).filter(([t]) => t >= 0));
 
 /** Turn 100 ms microphone loudness samples into [start, end] intervals where the user was speaking. */
 function micIntervals(samples) {
@@ -313,10 +343,18 @@ async function startRecording() {
   const mime = ["video/webm;codecs=vp9,opus", "video/webm;codecs=vp8,opus", "video/webm"].find((m) => MediaRecorder.isTypeSupported(m));
   rec.recorder = new MediaRecorder(mixed, { mimeType: mime, videoBitsPerSecond: 600_000, audioBitsPerSecond: 64_000 });
   rec.parts = []; rec.bytes = 0; rec.name = $("#recName").value.trim() || `Cuộc họp ${new Date().toLocaleString("vi-VN")}`;
-  rec.recorder.ondataavailable = (e) => { if (e.data.size) { rec.parts.push(e.data); rec.bytes += e.data.size; } };
+  rec.recorder.ondataavailable = (e) => {
+    if (!e.data.size) return;
+    rec.parts.push(e.data); rec.bytes += e.data.size;
+    if (!rec.id) return;
+    const id = rec.id, update = { bytes: rec.bytes, seconds: (Date.now() - rec.t0) / 1000, micActivity: micActivityNow() };
+    rec.saving = rec.saving.then(() => rec.id === id && store.appendPart(id, e.data, update)).catch(saveFailed);
+  };
   rec.recorder.onstop = finishRecording;
   display.getVideoTracks()[0].onended = () => rec.recorder?.state === "recording" && rec.recorder.stop();
   rec.t0 = Date.now();
+  rec.id = null; rec.unsaved = false; rec.saving = Promise.resolve();
+  try { rec.id = await store.createRecording({ name: rec.name, t0: rec.t0 }); } catch (e) { saveFailed(e); }
   rec.recorder.start(10_000);
 
   const v = $("#recPreview"); v.srcObject = display; v.play(); v.classList.remove("hidden");
@@ -326,32 +364,75 @@ async function startRecording() {
     $("#recTime").textContent = [s / 3600, (s % 3600) / 60, s % 60].map((x) => String(Math.floor(x)).padStart(2, "0")).join(":");
     $("#recSize").textContent = (rec.bytes / 1e6).toFixed(1) + " MB";
   }, 1000);
-  window.onbeforeunload = () => "Đang ghi cuộc họp";
+  updateLeaveGuard();
 }
 
 function finishRecording() {
-  clearInterval(rec.timer); clearInterval(rec.micTimer); window.onbeforeunload = null;
+  clearInterval(rec.timer); clearInterval(rec.micTimer);
   const seconds = (Date.now() - rec.t0) / 1000;
-  const micActivity = micIntervals(rec.mic.map(([ms, rms]) => [(ms - rec.t0) / 1000, rms]).filter(([t]) => t >= 0));
+  const micActivity = micActivityNow();
   rec.mic = [];
   rec.streams.forEach((s) => s.getTracks().forEach((t) => t.stop()));
   rec.ctx?.close();
   $("#recPreview").classList.add("hidden"); $("#recStatus").classList.add("hidden");
   $("#recStop").disabled = true; rec.recorder = null; $("#recStart").disabled = busy;
-  if (!rec.bytes) { toast("Không có dữ liệu ghi"); return; }
-  const file = new File(rec.parts, `${rec.name}.webm`, { type: "video/webm" });
+  updateLeaveGuard();
+  const recordingId = rec.id;
+  if (!rec.bytes) {
+    toast("Không có dữ liệu ghi");
+    if (recordingId) store.deleteRecording(recordingId).catch(() => {});
+    rec.unsaved = false; updateLeaveGuard();
+    return;
+  }
+  const file = new File(rec.parts, `${rec.name.replace(/[\\/:*?"<>|]+/g, "_")}.webm`, { type: "video/webm" });
   rec.parts = [];
+  const mic = micActivity.length ? micActivity : null;
+  const saved = recordingId
+    ? rec.saving.then(() => rec.id === recordingId && store.updateRecording(recordingId, { finished: true, seconds, bytes: file.size, micActivity: mic })).catch(saveFailed)
+    : Promise.resolve();
   // offer the raw recording too, so nothing is lost if processing fails
   const keep = $("#jobOutputs");
-  startJob(file, { knownDuration: seconds, sourceName: rec.name, micActivity: micActivity.length ? micActivity : null }).then(() => {
+  startJob(file, { knownDuration: seconds, sourceName: rec.name, micActivity: mic, recordingId, saved }).then((ok) => {
+    if (ok) { rec.unsaved = false; updateLeaveGuard(); }
     const b = document.createElement("button"); b.textContent = "⬇ File ghi hình (.webm)";
-    b.onclick = () => download(file, file.name); keep.appendChild(b);
+    b.onclick = () => { download(file, file.name); rec.unsaved = false; updateLeaveGuard(); };
+    keep.appendChild(b);
   });
 }
+
+// ---------- recordings saved in this browser ----------
+let savedRecs = [];
+let jobRecId = null; // saved recording the running job is processing
+async function renderSaved() {
+  try { savedRecs = await store.listRecordings(); } catch { savedRecs = []; } // IndexedDB unavailable
+  // hide the one still being recorded and the one being processed
+  savedRecs = savedRecs.filter((r) => !(rec.recorder && r.id === rec.id) && r.id !== jobRecId);
+  $("#savedRecs").classList.toggle("hidden", !savedRecs.length);
+  $("#savedList").innerHTML = savedRecs.map((r) => `<li data-id="${esc(r.id)}">
+    <div><b>${esc(r.name)}</b><span class="muted">${new Date(r.t0).toLocaleString("vi-VN")} · ${fmt(r.seconds)} · ${(r.bytes / 1e6).toFixed(1)} MB${
+      r.broken ? " · lưu thiếu phần cuối" : r.finished ? "" : " · bị gián đoạn (giữ phần đã ghi)"}</span></div>
+    <div class="row"><button class="primary" data-act="run">Tạo báo cáo</button><button data-act="dl">⬇ Tải về</button><button data-act="del">Xoá</button></div>
+  </li>`).join("");
+}
+$("#savedList").onclick = async (e) => {
+  const act = e.target.dataset?.act;
+  const r = savedRecs.find((x) => x.id === e.target.closest("li")?.dataset.id);
+  if (!act || !r) return;
+  if (act === "del") {
+    if (!confirm(`Xoá bản ghi "${r.name}" khỏi trình duyệt? Không khôi phục được.`)) return;
+    await store.deleteRecording(r.id); renderSaved(); return;
+  }
+  if (act === "run" && busy) { toast("Đang xử lý một báo cáo khác"); return; }
+  const file = await store.recordingFile(r);
+  if (!file.size) { toast("Bản ghi trống"); return; }
+  if (act === "dl") download(file, file.name);
+  else startJob(file, { knownDuration: r.seconds, sourceName: r.name, micActivity: r.micActivity, recordingId: r.id });
+};
 $("#recStart").onclick = startRecording;
 $("#recStop").onclick = () => rec.recorder?.state === "recording" && rec.recorder.stop();
 
 renderSettings();
+renderSaved();
 if (!window.isSecureContext || !navigator.mediaDevices?.getDisplayMedia) {
   $("#recStart").disabled = true;
   $("#recStart").title = "Trình duyệt này không hỗ trợ ghi màn hình";

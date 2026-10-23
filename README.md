@@ -18,6 +18,11 @@ của chính người dùng.
      trực tiếp được từ trình duyệt: hãy tải video về rồi dùng ô Tải lên.
 4. Đợi xử lý xong, file DOCX tự tải về. Bản gỡ băng (.txt) có nút tải riêng.
 
+**Bản ghi không bị mất:** trong lúc ghi, cứ 10 giây trang lưu phần mới vào IndexedDB của trình duyệt. Tải lại trang,
+tắt trình duyệt giữa chừng hay job bị lỗi thì bản ghi vẫn nằm ở mục **Bản ghi chưa xử lý** đầu trang, với các nút
+Tạo báo cáo, Tải về (.webm) và Xoá. Bản ghi tự xoá khi đã tạo báo cáo thành công. Nếu trình duyệt không cho lưu
+(cửa sổ ẩn danh, ổ đầy), trang báo ngay và hỏi lại trước khi bạn rời trang.
+
 ## Ai nói gì, giao việc cho ai
 
 - **Người dự họp:** điền mỗi dòng một người theo dạng `Tên – vai trò`. Danh sách này được nhớ cho lần sau.

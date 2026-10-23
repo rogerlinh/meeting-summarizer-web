@@ -88,3 +88,11 @@ code { font-size: 12px; }
 .conf { font-size: 12px; }
 .conf.cao { color: var(--ok); } .conf.trung { color: var(--warn); } .conf.thap { color: var(--bad); }
 @media (max-width: 600px) { .spk { grid-template-columns: 1fr; } }
+.saved { margin-bottom: 16px; border-color: var(--accent-2); }
+.saved ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.saved li { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap;
+  padding: 10px 12px; background: var(--bg); border-radius: 10px; }
+.saved li > div:first-child { display: flex; flex-direction: column; min-width: 0; }
+.saved li b { word-break: break-word; }
+.saved li .row { flex: 0 0 auto; }
+.saved li .row button { padding: 6px 12px; white-space: nowrap; }
